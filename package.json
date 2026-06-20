@@ -1,0 +1,5 @@
+{
+  "name": "mundibelleza-webhook",
+  "version": "1.0.0",
+  "description": "Webhook que conecta Kommo con la API de Claude para extraer nombre y tipo de negocio (Vercel)"
+}
