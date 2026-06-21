@@ -86,16 +86,38 @@ export default async function handler(req, res) {
 
     const mensajeCliente =
       (req.method === "POST"
-        ? (req.body && (req.body.message_text || req.body.text))
+        ? (req.body &&
+           (req.body["data[message_text]"] ||
+            req.body.message_text ||
+            req.body.text ||
+            (req.body.data && req.body.data.message_text)))
         : (req.query.mensaje || req.query.message_text || req.query.text)) || "";
 
-    const leadId =
+    // El lead_id puede venir de varias formas según el origen de la llamada:
+    // 1. Directo como lead_id (pruebas manuales)
+    // 2. Dentro de additional_data.id (formato KWID)
+    // 3. Decodificado del JWT "token" que manda widget_request (campo entity_id)
+    let leadId =
       (req.method === "POST"
-        ? (req.body && (req.body.lead_id || (req.body.additional_data && req.body.additional_data.id)))
+        ? (req.body &&
+           (req.body.lead_id || (req.body.additional_data && req.body.additional_data.id)))
         : req.query.lead_id) || null;
 
+    if (!leadId && req.method === "POST" && req.body && req.body.token) {
+      try {
+        const payloadBase64 = req.body.token.split(".")[1];
+        const payloadJson = Buffer.from(payloadBase64, "base64").toString("utf8");
+        const payload = JSON.parse(payloadJson);
+        leadId = payload.entity_id || null;
+      } catch (e) {
+        console.error("No se pudo decodificar el token JWT:", e.message);
+      }
+    }
+
     const tipo =
-      (req.method === "POST" ? req.body && req.body.tipo : req.query.tipo) || "";
+      (req.method === "POST"
+        ? (req.body && (req.body["data[tipo]"] || req.body.tipo || (req.body.data && req.body.data.tipo)))
+        : req.query.tipo) || "";
 
     if (!mensajeCliente) {
       return res.status(400).json({
