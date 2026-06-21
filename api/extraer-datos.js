@@ -84,7 +84,15 @@ async function avisarAKommoQueContinue(returnUrl, datosParaElBot) {
 
   const body = {
     data: datosParaElBot,
-    execute_handlers: [],
+    execute_handlers: [
+      {
+        handler: "goto",
+        params: {
+          type: "question",
+          step: 1,
+        },
+      },
+    ],
   };
 
   const resp = await fetch(returnUrl, {
