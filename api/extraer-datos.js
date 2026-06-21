@@ -72,7 +72,10 @@ async function actualizarLeadEnKommo(leadId, tipo, valor) {
 
 // Llama al return_url para avisarle a Kommo que el paso terminó y que
 // continúe el flujo del Salesbot, pasándole el resultado como variables.
-async function avisarAKommoQueContinue(returnUrl, resultadoJson) {
+// El "token" JWT original debe reenviarse como autenticación, porque
+// Kommo lo usa para verificar que la respuesta viene de la llamada
+// original que él mismo disparó.
+async function avisarAKommoQueContinue(returnUrl, token, resultadoJson) {
   if (!returnUrl) {
     console.error("No hay return_url, el bot podría quedarse esperando.");
     return;
@@ -82,6 +85,7 @@ async function avisarAKommoQueContinue(returnUrl, resultadoJson) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
     },
     body: JSON.stringify(resultadoJson),
   });
@@ -144,6 +148,7 @@ export default async function handler(req, res) {
         : req.query.tipo) || "";
 
     const returnUrl = req.method === "POST" ? req.body && req.body.return_url : null;
+    const tokenOriginal = req.method === "POST" ? req.body && req.body.token : null;
 
     if (!mensajeCliente) {
       return res.status(400).json({
@@ -226,7 +231,7 @@ export default async function handler(req, res) {
         ok: false,
         error: "No se pudo guardar en Kommo",
       };
-      await avisarAKommoQueContinue(returnUrl, resultadoError);
+      await avisarAKommoQueContinue(returnUrl, tokenOriginal, resultadoError);
       return res.status(500).json({
         error: "Claude extrajo el dato pero no se pudo guardar en Kommo",
         detalle: kommoError.message,
@@ -242,7 +247,7 @@ export default async function handler(req, res) {
     };
 
     // Avisamos a Kommo que el paso terminó, para que el bot continúe
-    await avisarAKommoQueContinue(returnUrl, resultadoFinal);
+    await avisarAKommoQueContinue(returnUrl, tokenOriginal, resultadoFinal);
 
     return res.status(200).json(resultadoFinal);
 
