@@ -85,7 +85,7 @@ async function avisarAKommoQueContinue(returnUrl, token, resultadoJson) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
+      "X-Auth-Token": token,
     },
     body: JSON.stringify(resultadoJson),
   });
