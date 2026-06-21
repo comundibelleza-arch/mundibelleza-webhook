@@ -10,16 +10,12 @@ const KOMMO_DOMAIN = "comundibelleza.kommo.com";
 
 // IDs de los campos personalizados en Kommo (Configuración → Campos personalizados)
 const CAMPO_NOMBRE_ID = 1288972; // "Nombre cliente (IA)" — tipo texto
-const CAMPO_TIPO_NEGOCIO_ID = 1288974; // "Tipo de negocio" — tipo lista (select)
-
-// IDs de las opciones dentro del campo "Tipo de negocio"
-const OPCION_INDEPENDIENTE_ID = 935436;
-const OPCION_SALON_ID = 935438;
+const CAMPO_TIPO_NEGOCIO_ID = 1288976; // "Tipo de negocio (texto)" — tipo texto libre
 
 const SYSTEM_PROMPT = `Eres un extractor de datos. A partir del mensaje del cliente, extrae dos datos:
 
 1. nombre: el nombre de pila de la persona (solo el nombre, sin apellidos ni frases adicionales)
-2. tipo_negocio: clasifica como "independiente" si trabaja por su cuenta, o "salon" si menciona tener salón, local o equipo de trabajo
+2. tipo_negocio: describe en pocas palabras cómo trabaja la persona, usando sus propias palabras o una versión corta y clara (ejemplos: "independiente", "salón propio", "trabaja a domicilio", "clínica de estética", "alquila silla en salón"). No te limites a categorías fijas, usa lo que el cliente realmente describió.
 
 Si algún dato no aparece en el mensaje, usa null para ese campo.
 
@@ -38,11 +34,10 @@ async function actualizarLeadEnKommo(leadId, nombre, tipoNegocio) {
     });
   }
 
-  if (tipoNegocio === "independiente" || tipoNegocio === "salon") {
-    const enumId = tipoNegocio === "independiente" ? OPCION_INDEPENDIENTE_ID : OPCION_SALON_ID;
+  if (tipoNegocio) {
     campos.push({
       field_id: CAMPO_TIPO_NEGOCIO_ID,
-      values: [{ enum_id: enumId }],
+      values: [{ value: tipoNegocio }],
     });
   }
 
@@ -87,7 +82,7 @@ export default async function handler(req, res) {
 
     const leadId =
       (req.method === "POST"
-        ? (req.body && req.body.lead_id)
+        ? (req.body && (req.body.lead_id || (req.body.additional_data && req.body.additional_data.id)))
         : req.query.lead_id) || null;
 
     if (!mensajeCliente) {
