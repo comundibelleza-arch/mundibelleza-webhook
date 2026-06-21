@@ -42,7 +42,7 @@ async function actualizarLeadEnKommo(leadId, nombre, tipoNegocio) {
     const enumId = tipoNegocio === "independiente" ? OPCION_INDEPENDIENTE_ID : OPCION_SALON_ID;
     campos.push({
       field_id: CAMPO_TIPO_NEGOCIO_ID,
-      values: [{ value: enumId, enum_id: enumId }],
+      values: [{ enum_id: enumId }],
     });
   }
 
