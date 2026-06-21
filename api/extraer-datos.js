@@ -123,7 +123,15 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Error al llamar a Claude", detalle: data });
     }
 
-    const textoRespuesta = data.content[0].text.trim();
+    let textoRespuesta = data.content[0].text.trim();
+
+    // A veces Claude envuelve el JSON en backticks de markdown (```json ... ```)
+    // aunque se le pida no hacerlo. Lo limpiamos antes de parsear.
+    textoRespuesta = textoRespuesta
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/, "")
+      .replace(/```\s*$/, "")
+      .trim();
 
     let resultado;
     try {
