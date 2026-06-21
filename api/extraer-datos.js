@@ -95,8 +95,6 @@ async function avisarAKommoQueContinue(returnUrl, datosParaElBot) {
     ],
   };
 
-  console.log("Body enviado a return_url:", JSON.stringify(body));
-
   const resp = await fetch(returnUrl, {
     method: "POST",
     headers: {
@@ -121,13 +119,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // LOG DE DIAGNÓSTICO TEMPORAL: registra exactamente qué llegó
-    console.log("=== DIAGNÓSTICO ===");
-    console.log("Método:", req.method);
-    console.log("Body completo:", JSON.stringify(req.body));
-    console.log("Query completo:", JSON.stringify(req.query));
-    console.log("===================");
-
     const mensajeCliente =
       (req.method === "POST"
         ? (req.body &&
@@ -164,7 +155,6 @@ export default async function handler(req, res) {
         : req.query.tipo) || "";
 
     const returnUrl = req.method === "POST" ? req.body && req.body.return_url : null;
-    const tokenOriginal = req.method === "POST" ? req.body && req.body.token : null;
 
     if (!mensajeCliente) {
       return res.status(400).json({
