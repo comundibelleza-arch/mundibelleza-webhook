@@ -119,6 +119,11 @@ export default async function handler(req, res) {
   }
 
   try {
+    // LOG DE DIAGNÓSTICO TEMPORAL
+    console.log("=== DIAGNÓSTICO ===");
+    console.log("Body completo:", JSON.stringify(req.body));
+    console.log("===================");
+
     const mensajeCliente =
       (req.method === "POST"
         ? (req.body &&
