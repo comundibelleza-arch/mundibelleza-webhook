@@ -70,24 +70,30 @@ async function actualizarLeadEnKommo(leadId, tipo, valor) {
   return kommoData;
 }
 
-// Llama al return_url para avisarle a Kommo que el paso terminó y que
-// continúe el flujo del Salesbot, pasándole el resultado como variables.
-// El "token" JWT original debe reenviarse como autenticación, porque
-// Kommo lo usa para verificar que la respuesta viene de la llamada
-// original que él mismo disparó.
-async function avisarAKommoQueContinue(returnUrl, token, resultadoJson) {
+// Llama al endpoint de confirmación de ejecución del widget para avisarle
+// a Kommo que el paso terminó y que continúe el flujo del Salesbot.
+// Documentación: POST /api/v4/{bot}/{bot_id}/continue/{continue_id}
+// Se autentica con el token de larga duración de la integración (KOMMO_TOKEN),
+// NO con el JWT que viene en el body original.
+// El body debe tener la forma { data: {...}, execute_handlers: [...] }
+async function avisarAKommoQueContinue(returnUrl, datosParaElBot) {
   if (!returnUrl) {
     console.error("No hay return_url, el bot podría quedarse esperando.");
     return;
   }
 
+  const body = {
+    data: datosParaElBot,
+    execute_handlers: [],
+  };
+
   const resp = await fetch(returnUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Auth-Token": token,
+      "Authorization": `Bearer ${KOMMO_TOKEN}`,
     },
-    body: JSON.stringify(resultadoJson),
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -231,7 +237,7 @@ export default async function handler(req, res) {
         ok: false,
         error: "No se pudo guardar en Kommo",
       };
-      await avisarAKommoQueContinue(returnUrl, tokenOriginal, resultadoError);
+      await avisarAKommoQueContinue(returnUrl, resultadoError);
       return res.status(500).json({
         error: "Claude extrajo el dato pero no se pudo guardar en Kommo",
         detalle: kommoError.message,
@@ -247,7 +253,7 @@ export default async function handler(req, res) {
     };
 
     // Avisamos a Kommo que el paso terminó, para que el bot continúe
-    await avisarAKommoQueContinue(returnUrl, tokenOriginal, resultadoFinal);
+    await avisarAKommoQueContinue(returnUrl, resultadoFinal);
 
     return res.status(200).json(resultadoFinal);
 
