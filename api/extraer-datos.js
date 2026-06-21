@@ -95,6 +95,8 @@ async function avisarAKommoQueContinue(returnUrl, datosParaElBot) {
     ],
   };
 
+  console.log("Body enviado a return_url:", JSON.stringify(body));
+
   const resp = await fetch(returnUrl, {
     method: "POST",
     headers: {
@@ -242,7 +244,7 @@ export default async function handler(req, res) {
     } catch (kommoError) {
       console.error("Error al actualizar Kommo:", kommoError.message);
       const resultadoError = {
-        ok: false,
+        ok: "false",
         error: "No se pudo guardar en Kommo",
       };
       await avisarAKommoQueContinue(returnUrl, resultadoError);
@@ -254,7 +256,7 @@ export default async function handler(req, res) {
     }
 
     const resultadoFinal = {
-      ok: true,
+      ok: "true",
       tipo: tipo,
       valor: valorExtraido || null,
       guardado_en_kommo: true,
