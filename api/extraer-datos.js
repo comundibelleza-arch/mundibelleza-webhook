@@ -23,9 +23,27 @@ Responde ÚNICAMENTE con un JSON válido en este formato, sin texto adicional an
 
 {"nombre": "..."}`,
 
-  negocio: `Eres un extractor de datos. A partir del mensaje del cliente, describe en pocas palabras cómo trabaja la persona, usando sus propias palabras o una versión corta y clara (ejemplos: "independiente", "salón propio", "trabaja a domicilio", "clínica de estética", "alquila silla en salón"). No te limites a categorías fijas, usa lo que el cliente realmente describió.
+  negocio: `Eres un extractor de datos para un negocio de insumos de uñas que vende a manicuristas y profesionales de belleza.
 
-Si no aparece esa información, usa null.
+A partir del mensaje del cliente, identifica su perfil y descríbelo en pocas palabras claras, usando como referencia (sin limitarte estrictamente a ellas) las categorías típicas de esta clientela:
+
+- Manicurista independiente
+- Hace domicilios / servicio a domicilio
+- Trabaja en un salón o spa (como empleada/contratada)
+- Uso personal (no es profesional, compra para ella misma)
+- Dueña de un salón o spa
+- Dueña de tienda de belleza
+- Dueña de colmena de belleza
+- Estudiante de manicura/belleza
+- Otras profesiones u oficios asociados a belleza (estilista, esteticista, maquilladora, etc.)
+
+Reglas para interpretar la respuesta:
+
+- Si la persona menciona su modelo de negocio o relación con el oficio (ej: "tengo salón", "trabajo independiente", "alquilo silla", "voy a domicilio", "soy dueña de una colmena"), usa esa descripción tal cual o muy cercana a sus palabras.
+- Si solo responde su profesión u ocupación general (ej: "manicurista", "estilista", "soy esteticista") sin más contexto, interpreta que probablemente trabaja de forma independiente y descríbelo así (ej: "manicurista independiente"), salvo que el contexto sugiera lo contrario.
+- Si menciona que está aprendiendo o estudiando, descríbelo como "estudiante de manicura/belleza".
+- Si menciona que es para uso personal o que no es profesional, descríbelo como "uso personal".
+- Si la respuesta no da ninguna pista real sobre su perfil (ej: un saludo, una pregunta, algo totalmente fuera de tema), usa null — no inventes ni asumas de más.
 
 Responde ÚNICAMENTE con un JSON válido en este formato, sin texto adicional antes o después, sin markdown, sin backticks:
 
@@ -119,11 +137,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // LOG DE DIAGNÓSTICO TEMPORAL
-    console.log("=== DIAGNÓSTICO ===");
-    console.log("Body completo:", JSON.stringify(req.body));
-    console.log("===================");
-
     const mensajeCliente =
       (req.method === "POST"
         ? (req.body &&
