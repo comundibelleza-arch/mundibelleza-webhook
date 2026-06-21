@@ -70,6 +70,30 @@ async function actualizarLeadEnKommo(leadId, tipo, valor) {
   return kommoData;
 }
 
+// Llama al return_url para avisarle a Kommo que el paso terminó y que
+// continúe el flujo del Salesbot, pasándole el resultado como variables.
+async function avisarAKommoQueContinue(returnUrl, resultadoJson) {
+  if (!returnUrl) {
+    console.error("No hay return_url, el bot podría quedarse esperando.");
+    return;
+  }
+
+  const resp = await fetch(returnUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(resultadoJson),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error(`Error al llamar return_url (${resp.status}):`, txt);
+  } else {
+    console.log("return_url llamado correctamente, el bot debería continuar.");
+  }
+}
+
 export default async function handler(req, res) {
   // Aceptamos tanto POST (con body JSON) como GET (con ?mensaje=...&lead_id=...&tipo=... en la URL)
   if (req.method !== "POST" && req.method !== "GET") {
@@ -118,6 +142,8 @@ export default async function handler(req, res) {
       (req.method === "POST"
         ? (req.body && (req.body["data[tipo]"] || req.body.tipo || (req.body.data && req.body.data.tipo)))
         : req.query.tipo) || "";
+
+    const returnUrl = req.method === "POST" ? req.body && req.body.return_url : null;
 
     if (!mensajeCliente) {
       return res.status(400).json({
@@ -196,6 +222,11 @@ export default async function handler(req, res) {
       await actualizarLeadEnKommo(leadId, tipo, valorExtraido);
     } catch (kommoError) {
       console.error("Error al actualizar Kommo:", kommoError.message);
+      const resultadoError = {
+        ok: false,
+        error: "No se pudo guardar en Kommo",
+      };
+      await avisarAKommoQueContinue(returnUrl, resultadoError);
       return res.status(500).json({
         error: "Claude extrajo el dato pero no se pudo guardar en Kommo",
         detalle: kommoError.message,
@@ -203,12 +234,17 @@ export default async function handler(req, res) {
       });
     }
 
-    return res.status(200).json({
+    const resultadoFinal = {
       ok: true,
       tipo: tipo,
       valor: valorExtraido || null,
       guardado_en_kommo: true,
-    });
+    };
+
+    // Avisamos a Kommo que el paso terminó, para que el bot continúe
+    await avisarAKommoQueContinue(returnUrl, resultadoFinal);
+
+    return res.status(200).json(resultadoFinal);
 
   } catch (error) {
     console.error("Error general en el webhook:", error);
