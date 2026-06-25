@@ -5,7 +5,7 @@ const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_TOKEN = process.env.WA_TOKEN;
 const CATALOG_ID = process.env.CATALOG_ID;
 const KOMMO_SUBDOMAIN = "comundibelleza";
-const TEMPLATE_NAME = "ver_catalogo_mundibelleza";
+const TEMPLATE_NAME = "catalogo_unas";
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
