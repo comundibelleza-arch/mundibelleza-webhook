@@ -24,6 +24,7 @@ module.exports = async function handler(req, res) {
 
     if (!leadId) {
       return res.status(400).json({
+        ok: false,
         error: "No se recibió el Lead ID"
       });
     }
@@ -44,10 +45,10 @@ module.exports = async function handler(req, res) {
     const timeline = await response.json();
 
     //────────────────────────────────────────────
-    // 3. BUSCAR EL ÚLTIMO CARRITO
+    // 3. BUSCAR EL ÚLTIMO PEDIDO
     //────────────────────────────────────────────
 
-    let carrito = null;
+    let pedido = null;
 
     if (timeline._embedded?.items) {
 
@@ -58,7 +59,7 @@ module.exports = async function handler(req, res) {
         if (
           item.data?.message_attributes?.waba?.products_message?.type === "order"
         ) {
-          carrito = item;
+          pedido = item;
           break;
         }
 
@@ -66,17 +67,29 @@ module.exports = async function handler(req, res) {
 
     }
 
-    if (!carrito) {
-
+    if (!pedido) {
       return res.status(404).json({
         ok: false,
-        mensaje: "No se encontró ningún carrito."
+        mensaje: "No se encontró ningún pedido."
       });
-
     }
 
     //────────────────────────────────────────────
-    // 4. RESPONDER
+    // 4. EXTRAER PRODUCTOS
+    //────────────────────────────────────────────
+
+    const products =
+      pedido.data.message_attributes.waba.products_message.sets[0].products;
+
+    const productos = products.map(producto => ({
+      sku: producto.id,
+      cantidad: producto.quantity,
+      precio: producto.price.value,
+      moneda: producto.price.currency
+    }));
+
+    //────────────────────────────────────────────
+    // 5. RESPUESTA
     //────────────────────────────────────────────
 
     return res.status(200).json({
@@ -85,7 +98,11 @@ module.exports = async function handler(req, res) {
 
       lead_id: leadId,
 
-      carrito: carrito.data.message_attributes.waba.products_message
+      chat_id: payload.chat_id || null,
+
+      productos,
+
+      pedido_original: pedido
 
     });
 
