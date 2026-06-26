@@ -13,9 +13,8 @@ module.exports = async function handler(req, res) {
     // 1. OBTENER LEAD ID
     //────────────────────────────────────────────
 
-    const returnUrl = req.body["return_url"];
-
     const payloadBase64 = req.body.token.split(".")[1];
+
     const payload = JSON.parse(
       Buffer.from(payloadBase64, "base64").toString("utf8")
     );
@@ -36,11 +35,16 @@ module.exports = async function handler(req, res) {
     const response = await fetch(
       `https://${KOMMO_SUBDOMAIN}.kommo.com/ajax/v3/leads/${leadId}/events_timeline/?limit=100`,
       {
+        method: "GET",
         headers: {
           Authorization: `Bearer ${KOMMO_TOKEN}`
         }
       }
     );
+
+    if (!response.ok) {
+      throw new Error("Error consultando events_timeline en Kommo");
+    }
 
     const timeline = await response.json();
 
@@ -75,18 +79,28 @@ module.exports = async function handler(req, res) {
     }
 
     //────────────────────────────────────────────
-    // 4. EXTRAER PRODUCTOS
+    // 4. EXTRAER TODOS LOS PRODUCTOS
     //────────────────────────────────────────────
 
-    const products =
-      pedido.data.message_attributes.waba.products_message.sets[0].products;
+    const sets =
+      pedido.data.message_attributes.waba.products_message.sets || [];
 
-    const productos = products.map(producto => ({
-      sku: producto.id,
-      cantidad: producto.quantity,
-      precio: producto.price.value,
-      moneda: producto.price.currency
-    }));
+    const productos = [];
+
+    sets.forEach(set => {
+
+      (set.products || []).forEach(producto => {
+
+        productos.push({
+          sku: producto.id,
+          cantidad: producto.quantity,
+          precio: producto.price.value,
+          moneda: producto.price.currency
+        });
+
+      });
+
+    });
 
     //────────────────────────────────────────────
     // 5. RESPUESTA
@@ -98,8 +112,6 @@ module.exports = async function handler(req, res) {
 
       lead_id: leadId,
 
-      chat_id: payload.chat_id || null,
-
       productos,
 
       pedido_original: pedido
@@ -108,7 +120,7 @@ module.exports = async function handler(req, res) {
 
   } catch (error) {
 
-    console.error(error);
+    console.error("Error en procesar_carrito:", error);
 
     return res.status(500).json({
       ok: false,
