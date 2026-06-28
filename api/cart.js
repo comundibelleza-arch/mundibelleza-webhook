@@ -27,6 +27,7 @@ export default async function handler(req, res) {
         cantidad: p.quantity ?? 1,
         precio:   p.price    ?? 0,
         moneda:   p.currency ?? 'COP',
+        conversation_chat_id: body.conversationChatId ?? '',
       }))
     };
 
