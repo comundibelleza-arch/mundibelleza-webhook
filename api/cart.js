@@ -8,23 +8,22 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
 
-    // Ping de prueba
     if (body?.test === true) {
       return res.status(200).json({ ok: true, message: 'Conexión exitosa' });
     }
 
-    // Validar campos mínimos
     if (!body?.leadId || !Array.isArray(body?.products) || body.products.length === 0) {
       return res.status(400).json({ error: 'Payload inválido', received: body });
     }
 
     const payload = {
-      lead_id:   body.leadId,
-      chat_id:   body.messageId ?? body.chat_id ?? '',
-      cliente:   body.cliente  ?? '',
-      telefono:  body.telefono ?? '',
-      productos: body.products.map(p => ({
-        sku:      String(p.sku      ?? ''),
+      lead_id:    body.leadId,
+      chat_id:    body.messageId ?? body.chat_id ?? '',
+      cliente:    body.cliente   ?? '',
+      telefono:   body.telefono  ?? '',
+      antiguedad: body.antiguedad ?? '',
+      productos:  body.products.map(p => ({
+        sku:      String(p.sku ?? ''),
         cantidad: p.quantity ?? 1,
         precio:   p.price    ?? 0,
         moneda:   p.currency ?? 'COP',
