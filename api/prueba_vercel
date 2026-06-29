@@ -1,0 +1,36 @@
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+export default async function handler(req, res) {
+
+  let raw = "";
+
+  await new Promise((resolve) => {
+    req.on("data", chunk => {
+      raw += chunk;
+    });
+
+    req.on("end", resolve);
+  });
+
+  console.log("================================");
+  console.log("HEADERS");
+  console.log(req.headers);
+
+  console.log("RAW BODY");
+  console.log(raw);
+
+  try {
+    console.log("JSON");
+    console.log(JSON.stringify(JSON.parse(raw), null, 2));
+  } catch {
+    console.log("No era JSON");
+  }
+
+  console.log("================================");
+
+  res.status(200).send("OK");
+}
