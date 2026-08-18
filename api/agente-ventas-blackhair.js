@@ -1,4 +1,3 @@
-lackhair · JS
 // api/agente-ventas-blackhair.js
 //
 // Webhook de Salesbot (widget_request) para el agente de ventas de la
@@ -302,7 +301,7 @@ async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
     params: { type: "text", value: trozo },
   }));
   executeHandlers.push({ handler: "goto", params: { type: "question", step: STEP_ESPERAR_RESPUESTA } });
- 
+
   const body = {
     data: { mensaje, accion: accionKommo },
     execute_handlers: executeHandlers,
