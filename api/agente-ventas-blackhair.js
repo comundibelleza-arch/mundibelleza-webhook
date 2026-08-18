@@ -350,8 +350,10 @@ module.exports = async function handler(req, res) {
     const estado = await leerEstadoDelLead(leadId);
     let mensajeRespuesta;
     let accion = "seguir_conversando";
-    // 2) Primer contacto: manda bienvenida con precios, sin gastar LLM.
-    if (!mensajeCliente && !estado.combo) {
+    // 2) Mientras no haya combo elegido, saluda con precios, sin gastar LLM
+    //    (antes solo pasaba si además el mensaje venía vacío; eso fallaba
+    //    cuando Kommo sí mandaba el texto del primer mensaje del cliente).
+    if (!estado.combo) {
       mensajeRespuesta = MENSAJE_BIENVENIDA;
     } else {
       // 3) Intenta resolver por reglas (gratis).
