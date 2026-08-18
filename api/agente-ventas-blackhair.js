@@ -173,11 +173,23 @@ async function leerEstadoDelLead(leadId) {
     `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
     { headers: { Authorization: `Bearer ${KOMMO_TOKEN}` } }
   );
+  // Leemos siempre como texto primero: si Kommo responde con el cuerpo
+  // vacío (pasa incluso con status "ok" en algunos casos, p.ej. token
+  // inválido/redirect), esto evita que resp.json() truene con
+  // "Unexpected end of JSON input" y en vez de eso queda logueado qué
+  // vino realmente.
+  const texto = await resp.text();
   if (!resp.ok) {
-    console.error("Error leyendo lead en Kommo:", resp.status, await resp.text());
+    console.error("Error leyendo lead en Kommo:", resp.status, texto);
     return { combo: null, nombre: null, direccion: null, ciudad: null };
   }
-  const data = await resp.json();
+  let data;
+  try {
+    data = texto ? JSON.parse(texto) : {};
+  } catch (e) {
+    console.error("Kommo respondió 200 pero el cuerpo no es JSON válido:", texto);
+    return { combo: null, nombre: null, direccion: null, ciudad: null };
+  }
   const campos = {};
   for (const f of data.custom_fields_values || []) {
     campos[f.field_id] = f.values?.[0]?.value ?? null;
@@ -230,15 +242,34 @@ async function llamarLLM(estado, mensajeNuevo) {
       ],
     }),
   });
+  const cuerpoRespuesta = await response.text();
   if (!response.ok) {
-    console.error("Error de la API de Claude:", response.status, await response.text());
+    console.error("Error de la API de Claude:", response.status, cuerpoRespuesta);
     return {
       mensaje: "Perdón, ¿me lo repites? Tuve un problema técnico 🙏",
       accion: "seguir_conversando",
       datos_extraidos: {},
     };
   }
-  const data = await response.json();
+  let data;
+  try {
+    data = cuerpoRespuesta ? JSON.parse(cuerpoRespuesta) : {};
+  } catch (e) {
+    console.error("Claude respondió 200 pero el cuerpo no es JSON válido:", cuerpoRespuesta);
+    return {
+      mensaje: "Perdón, ¿me lo repites? Tuve un problema técnico 🙏",
+      accion: "seguir_conversando",
+      datos_extraidos: {},
+    };
+  }
+  if (!data.content || !data.content[0]) {
+    console.error("Claude respondió sin 'content':", cuerpoRespuesta);
+    return {
+      mensaje: "Perdón, ¿me lo repites? Tuve un problema técnico 🙏",
+      accion: "seguir_conversando",
+      datos_extraidos: {},
+    };
+  }
   let texto = data.content[0].text.trim();
   texto = texto.replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/```\s*$/, "").trim();
   try {
