@@ -15,13 +15,8 @@
 //  - ANTHROPIC_API_KEY  (ya la tienes)
 //  - KOMMO_TOKEN        (el mismo que usan extraer-datos.js / enviar_catalogo.js)
 //
-// IMPORTANTE — falta confirmar en tu cuenta:
-//  - STEP_ESPERAR_RESPUESTA abajo es un placeholder (copié el mismo "1"
-//    que usas en tus otros scripts). Confírmalo en tu Salesbot: debe ser
-//    el número del paso que "espera la siguiente respuesta libre del
-//    cliente" y vuelve a llamar a este mismo webhook.
-//
-// CORREGIDO (18-ago-2026), a partir de logs reales de Vercel:
+// CORREGIDO (18/19-ago-2026), a partir de logs reales de Vercel y del
+// editor visual del Salesbot:
 //  - Kommo rechaza con 400 "TooLong" cualquier execute_handlers.show cuyo
 //    "value" pase de 80 caracteres. Antes se mandaba el mensaje completo
 //    en un solo "show" y por eso NUNCA llegaba nada al cliente (ni el
@@ -35,10 +30,18 @@
 //    la respuesta venía vacía o con error, lo que producía un 500
 //    "Unexpected end of JSON input" si Kommo o Anthropic devolvían un
 //    cuerpo vacío (p.ej. token vencido). Ahora se revisa resp.ok primero.
+//  - Se quitó el "goto" que este archivo mandaba dentro de
+//    execute_handlers (antes saltaba a un número de paso "STEP_ESPERAR_
+//    RESPUESTA" copiado de otro bot, que no existía en este flujo y
+//    provocaba un loop: el bloque Julieta se volvía a disparar solo,
+//    decenas de veces, sin que el cliente escribiera nada). Ahora, ya que
+//    en el editor visual quedó armado un paso nativo de Kommo ("Pausa:
+//    Hasta recibir mensaje") conectado después de las salidas del bloque,
+//    dejamos que Kommo siga ese camino por su cuenta en vez de forzar un
+//    salto desde el código.
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_TOKEN;
 const KOMMO_SUBDOMAIN = "comundibelleza";
-const STEP_ESPERAR_RESPUESTA = 1; // <-- confirma este número en tu Salesbot
 // IDs de campos personalizados del lead (Configuración → Campos personalizados → Leads)
 const CAMPO_COMBO_ID = 1289164; // "Combo Blackhair"
 const CAMPO_NOMBRE_ID = 1288972; // ya existe ("Nombre cliente (IA)"), mismo que extraer-datos.js
@@ -318,8 +321,12 @@ async function actualizarLeadEnKommo(leadId, estado, accion) {
 }
 // ---------------------------------------------------------------------------
 // Le avisa a Kommo que continúe el bot, mandando el mensaje al cliente
-// (uno o varios handlers "show" de <=80 caracteres) y volviendo al paso
-// de espera (handler "goto").
+// (uno o varios handlers "show" de <=80 caracteres). NO mandamos "goto":
+// dejamos que Kommo siga el camino que ya está dibujado en el editor
+// visual del Salesbot (salida del bloque -> nota interna -> paso nativo
+// "Pausa: Hasta recibir mensaje" -> vuelta a Julieta). Mandar nuestro
+// propio "goto" a un número de paso inventado fue justo lo que causaba el
+// loop que vimos en los logs.
 // ---------------------------------------------------------------------------
 async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
   if (!returnUrl) {
@@ -331,7 +338,6 @@ async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
     handler: "show",
     params: { type: "text", value: trozo },
   }));
-  executeHandlers.push({ handler: "goto", params: { type: "question", step: STEP_ESPERAR_RESPUESTA } });
 
   const body = {
     data: { mensaje, accion: accionKommo },
