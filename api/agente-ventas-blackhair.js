@@ -195,6 +195,51 @@ const MENSAJE_REPREGUNTA_COMBO =
   "No logré identificar cuál kit prefieres 🙏 ¿Me confirmas si quieres el " +
   "Combo 1, el Combo 2 o el Combo 3?";
 // ---------------------------------------------------------------------------
+// AGREGADO (19-ago-2026): qué hacer cuando el cliente manda un audio, una
+// imagen, un sticker, un PDF, etc. Kommo normalmente NO manda transcripción
+// en message_text para ese tipo de mensajes — llega vacío (""), igual que si
+// el cliente no hubiera escrito nada. Antes eso se malinterpretaba distinto
+// según la fase (el caso más raro: en la fase de ventas sin combo elegido,
+// un audio hacía que se reenviara TODO el saludo con precios, como si fuera
+// el primer contacto). Ahora se corta con este mensaje fijo, sin tocar fase
+// ni ningún dato guardado, para no reiniciar ni romper el hilo.
+// OJO: esto es una inferencia sobre cómo Kommo arma el payload del Salesbot
+// para mensajes que no son texto, no algo confirmado con un log real de un
+// audio. Si revisas Vercel y ves que Kommo sí manda algún texto/placeholder
+// para audios (ej. "[audio]"), avisa para ajustar el chequeo de abajo.
+// ---------------------------------------------------------------------------
+const MENSAJE_MEDIA_NO_SOPORTADA =
+  "Por ahora no puedo escuchar audios ni ver archivos o imágenes 🙏 " +
+  "¿me escribes lo que necesitas?";
+// AGREGADO (19-ago-2026), a pedido del negocio: además de pedirle al
+// cliente que escriba, deja una nota interna en el lead para que alguien
+// del equipo entre a Kommo/WhatsApp y escuche el audio (o vea la imagen/
+// archivo) manualmente — el bot no lo puede procesar, pero puede traer
+// información igual de importante que un mensaje de texto (ej. el cliente
+// mandó su dirección hablada). Mismo endpoint de notas que ya se usa para
+// agregarNotaDePedidoCerrado.
+async function agregarNotaDeAudioNoLeido(leadId) {
+  const texto =
+    `🎧 El cliente mandó un audio, imagen o archivo que el bot no puede leer.\n` +
+    `Se le pidió que lo escriba, pero por si trae información importante ` +
+    `(ej. la dirección dictada), alguien del equipo debería revisarlo ` +
+    `manualmente en WhatsApp/Kommo.`;
+  const resp = await fetch(
+    `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KOMMO_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([{ note_type: "common", params: { text: texto } }]),
+    }
+  );
+  if (!resp.ok) {
+    console.error("Error agregando nota de audio/archivo no leído en Kommo:", resp.status, await resp.text());
+  }
+}
+// ---------------------------------------------------------------------------
 // Mensajes del embudo de pre-calificación (19-ago-2026). El paso 0 (la
 // pregunta de "¿cuántas canas tienes?") NO está aquí porque es un paso
 // nativo de Kommo, armado en el editor visual, fuera de este código.
@@ -909,7 +954,7 @@ async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
     console.error(`Error al llamar return_url (${resp.status}):`, await resp.text());
   }
 }
-module.exports = async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Método no permitido, usa POST" });
   }
@@ -937,12 +982,25 @@ module.exports = async function handler(req, res) {
     if (!leadId) {
       return res.status(400).json({ error: "No se recibió lead_id", body_recibido: req.body });
     }
-    // 1) Lee el estado actual directo de Kommo (esto ES la memoria de la conversación).
+    // 1) Si no llegó texto (típicamente audio/imagen/archivo — ver
+    //    MENSAJE_MEDIA_NO_SOPORTADA arriba), responde eso mismo y corta acá,
+    //    sin gastar una llamada a Kommo para leer el estado ni tocar fase/
+    //    combo/datos. Con el embudo de canas activo, un mensaje vacío ya NO
+    //    debería significar "primer contacto real" (ese ahora siempre llega
+    //    con texto, porque responde a la pregunta nativa de canas).
+    if (!mensajeCliente || !mensajeCliente.trim()) {
+      // Nota interna primero (para que quede aunque algo falle después) y
+      // luego el aviso a Kommo para que el bot le responda al cliente.
+      await agregarNotaDeAudioNoLeido(leadId);
+      await avisarAKommoQueContinue(returnUrl, MENSAJE_MEDIA_NO_SOPORTADA, accionParaKommo("seguir_conversando"));
+      return res.status(200).json({ ok: true, accion: "seguir", mensaje: MENSAJE_MEDIA_NO_SOPORTADA });
+    }
+    // 2) Lee el estado actual directo de Kommo (esto ES la memoria de la conversación).
     const estado = await leerEstadoDelLead(leadId);
     let mensajeRespuesta;
     let accion = "seguir_conversando";
     // ---------------------------------------------------------------------
-    // 2) EMBUDO DE PRE-CALIFICACIÓN (19-ago-2026), solo si ya configuraste
+    // 3) EMBUDO DE PRE-CALIFICACIÓN (19-ago-2026), solo si ya configuraste
     // los 3 campos nuevos en Kommo (FUNNEL_CANAS_HABILITADO). Mientras no
     // los configures, este bloque se salta entero y el bot se comporta
     // exactamente como antes (directo al flujo de ventas de abajo).
@@ -996,7 +1054,7 @@ module.exports = async function handler(req, res) {
         }
       }
     }
-    // 3) Si el embudo de pre-calificación no aplicó (o ya terminó), sigue
+    // 4) Si el embudo de pre-calificación no aplicó (o ya terminó), sigue
     //    el flujo de ventas de siempre, sin cambios respecto a antes.
     if (!yaResuelto) {
       // 3a) Intenta resolver por reglas primero (gratis). capaDeReglas ya
@@ -1027,7 +1085,7 @@ module.exports = async function handler(req, res) {
         if (d.combo) estado.combo = d.combo;
       }
     }
-    // 5) Guarda lo aprendido en Kommo (y mueve el pipeline solo si se cerró).
+    // 6) Guarda lo aprendido en Kommo (y mueve el pipeline solo si se cerró).
     await actualizarLeadEnKommo(leadId, estado, accion);
     if (accion === "cerrar_pedido") {
       // Deja el resumen del pedido como nota en el lead — es la única forma
@@ -1042,7 +1100,7 @@ module.exports = async function handler(req, res) {
       // console.log. Si quieres, se le puede agregar la misma nota interna,
       // o reusar enviarNotaInterna() como en webhook-carrito.js.
     }
-    // 6) Le devuelve el control al bot con el mensaje para el cliente y el
+    // 7) Le devuelve el control al bot con el mensaje para el cliente y el
     //    código de acción traducido al vocabulario del widget (cerrado/
     //    escalado/seguir).
     const accionKommo = accionParaKommo(accion);
@@ -1052,4 +1110,37 @@ module.exports = async function handler(req, res) {
     console.error("Error general en agente-ventas:", error);
     return res.status(500).json({ error: "Error interno del servidor" });
   }
-};
+}
+module.exports = handler;
+// ---------------------------------------------------------------------------
+// AGREGADO (19-ago-2026): se exponen estas piezas internas para que
+// api/seguimiento-leads-blackhair.js (el script de recordatorios a leads
+// que dejaron de contestar) las reutilice en vez de duplicar textos/lógica
+// — así, si cambias un mensaje o un field_id aquí, el script de seguimiento
+// automáticamente usa la versión nueva, sin tener que acordarte de tocar
+// dos archivos. No afecta a Vercel: module.exports sigue siendo la función
+// handler (los objetos función en JS pueden tener propiedades extra).
+// ---------------------------------------------------------------------------
+Object.assign(module.exports, {
+  leerEstadoDelLead,
+  preguntaSiguienteDato,
+  separarDireccionYDepartamento,
+  combinarDireccionYDepartamento,
+  MENSAJE_BIENVENIDA,
+  MENSAJE_REPREGUNTA_COMBO,
+  MENSAJE_PREGUNTA_OBJETIVO,
+  MENSAJE_INVITACION_OFERTAS,
+  MENSAJE_VALOR_BENEFICIOS,
+  COMBOS,
+  PIPELINE_ID,
+  STAGE_PEDIDO_CONFIRMADO_ID,
+  KOMMO_SUBDOMAIN,
+  KOMMO_TOKEN,
+  CAMPO_COMBO_ID,
+  CAMPO_NOMBRE_ID,
+  CAMPO_DIRECCION_ID,
+  CAMPO_CIUDAD_ID,
+  CAMPO_CANAS_ID,
+  CAMPO_OBJETIVO_ID,
+  CAMPO_FASE_ID,
+});
