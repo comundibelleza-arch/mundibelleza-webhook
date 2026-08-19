@@ -55,6 +55,11 @@ const CAMPO_CIUDAD_ID = 1274145; // ya existe ("Cuidad" — así está escrito e
 // Se usa solo como hito para reportes, no para decidir qué responde el bot.
 const PIPELINE_ID = 14307443;
 const STAGE_PEDIDO_CONFIRMADO_ID = 142;
+// Plantilla de WhatsApp aprobada para el primer contacto (la misma que ya
+// tenías probando como paso nativo en el editor). El código la manda él
+// mismo cuando el lead todavía no tiene combo elegido, en vez de depender
+// de un paso fijo aparte en el Salesbot.
+const TEMPLATE_ID_BIENVENIDA = 58184;
 const COMBOS = {
   1: { nombre: "Combo 1 (1 caja, 10 sobres)", precio: 59900 },
   2: { nombre: "Combo 2 (2 cajas, 20 sobres)", precio: 89999 },
@@ -320,24 +325,53 @@ async function actualizarLeadEnKommo(leadId, estado, accion) {
   }
 }
 // ---------------------------------------------------------------------------
-// Le avisa a Kommo que continúe el bot, mandando el mensaje al cliente
-// (uno o varios handlers "show" de <=80 caracteres). NO mandamos "goto":
-// dejamos que Kommo siga el camino que ya está dibujado en el editor
-// visual del Salesbot (salida del bloque -> nota interna -> paso nativo
-// "Pausa: Hasta recibir mensaje" -> vuelta a Julieta). Mandar nuestro
-// propio "goto" a un número de paso inventado fue justo lo que causaba el
-// loop que vimos en los logs.
+// Le avisa a Kommo que continúe el bot. Dos modos:
+//  - Con "plantillaId": manda un solo handler "send_message" con esa
+//    plantilla de WhatsApp aprobada (para el primer contacto, cuando
+//    todavía no hay combo y no se puede mandar texto libre con garantía).
+//  - Sin "plantillaId": manda el mensaje como uno o varios handlers "show"
+//    de <=80 caracteres (límite real de Kommo, confirmado por logs).
+// En ningún caso mandamos "goto": dejamos que Kommo siga el camino que ya
+// está dibujado en el editor visual del Salesbot (salida del bloque ->
+// nota interna -> paso nativo "Pausa: Hasta recibir mensaje" -> vuelta a
+// Julieta). Mandar nuestro propio "goto" a un número de paso inventado fue
+// justo lo que causaba el loop que vimos en los logs.
+//
+// OJO: no está confirmado todavía que Kommo acepte "send_message" con
+// template_id dentro de execute_handlers vía return_url (solo sabíamos que
+// lo acepta como paso nativo fijo del Salesbot). Si Kommo lo rechaza, el
+// log de "Error al llamar return_url" va a traer el detalle exacto, igual
+// que pasó con el límite de 80 caracteres.
 // ---------------------------------------------------------------------------
-async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
+async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo, plantillaId) {
   if (!returnUrl) {
     console.error("No hay return_url, el bot podría quedarse esperando.");
     return;
   }
-  const trozos = partirEnTrozos(mensaje);
-  const executeHandlers = trozos.map((trozo) => ({
-    handler: "show",
-    params: { type: "text", value: trozo },
-  }));
+  let executeHandlers;
+  if (plantillaId) {
+    executeHandlers = [
+      {
+        handler: "send_message",
+        params: {
+          type: "external",
+          tag: "",
+          send_to_all_chat_sources: true,
+          recipient: { type: "all_contacts", way_of_communication: "over_all" },
+          template_id: plantillaId,
+          products: null,
+          footer: null,
+          on_error: null,
+        },
+      },
+    ];
+  } else {
+    const trozos = partirEnTrozos(mensaje);
+    executeHandlers = trozos.map((trozo) => ({
+      handler: "show",
+      params: { type: "text", value: trozo },
+    }));
+  }
 
   const body = {
     data: { mensaje, accion: accionKommo },
@@ -387,11 +421,15 @@ module.exports = async function handler(req, res) {
     const estado = await leerEstadoDelLead(leadId);
     let mensajeRespuesta;
     let accion = "seguir_conversando";
-    // 2) Mientras no haya combo elegido, saluda con precios, sin gastar LLM
-    //    (antes solo pasaba si además el mensaje venía vacío; eso fallaba
-    //    cuando Kommo sí mandaba el texto del primer mensaje del cliente).
+    let plantillaAEnviar = null;
+    // 2) Mientras no haya combo elegido, saluda con precios mandando la
+    //    plantilla de WhatsApp aprobada (no texto libre por show), sin
+    //    gastar LLM. Se activa con solo que el widget se dispare y el
+    //    campo "Combo" siga vacío, sin importar qué haya escrito el
+    //    cliente.
     if (!estado.combo) {
       mensajeRespuesta = MENSAJE_BIENVENIDA;
+      plantillaAEnviar = TEMPLATE_ID_BIENVENIDA;
     } else {
       // 3) Intenta resolver por reglas (gratis).
       const porReglas = capaDeReglas(mensajeCliente, estado);
@@ -422,7 +460,7 @@ module.exports = async function handler(req, res) {
     //    código de acción traducido al vocabulario del widget (cerrado/
     //    escalado/seguir).
     const accionKommo = accionParaKommo(accion);
-    await avisarAKommoQueContinue(returnUrl, mensajeRespuesta, accionKommo);
+    await avisarAKommoQueContinue(returnUrl, mensajeRespuesta, accionKommo, plantillaAEnviar);
     return res.status(200).json({ ok: true, accion: accionKommo, mensaje: mensajeRespuesta });
   } catch (error) {
     console.error("Error general en agente-ventas:", error);
