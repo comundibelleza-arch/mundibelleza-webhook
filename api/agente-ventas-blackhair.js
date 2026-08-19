@@ -39,6 +39,18 @@
 //    Hasta recibir mensaje") conectado después de las salidas del bloque,
 //    dejamos que Kommo siga ese camino por su cuenta en vez de forzar un
 //    salto desde el código.
+//
+// ACTUALIZADO (19-ago-2026), a partir de investigación de producto (fabricante
+// SEVICH, ingredientes publicados, reseñas reales de compradores, FDA/NHS sobre
+// PPD): se agregó conocimiento de producto sintetizado al SYSTEM_PROMPT (qué es
+// realmente, qué NO se puede prometer, protocolo de alergia/PPD, perfil de
+// cliente) y varias FAQs fijas nuevas para objeciones frecuentes (alergia,
+// ¿es natural?, ¿tiene amoníaco?, ¿es permanente?, ¿sirve en barba?, ¿mancha la
+// piel?, ¿cuánto dura el color?, ¿cuánto alcanza un sobre?, ¿daña el cabello?).
+// Se pusieron como reglas fijas (no LLM) justamente porque son temas sensibles
+// (salud/alergia, afirmaciones legales tipo "natural"/"permanente") donde
+// conviene una respuesta siempre igual y ya revisada, en vez de dejar que el
+// LLM la redacte distinto cada vez.
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_TOKEN;
 const KOMMO_SUBDOMAIN = "comundibelleza";
@@ -190,6 +202,76 @@ const FAQ_SIEMPRE = [
       "transportadora 🚚, pero no te preocupes, enviaremos el pedido en el menor " +
       "tiempo posible para que lo recibas muy rápido 🤩🤩",
   },
+  // ---------------------------------------------------------------------
+  // FAQs nuevas (19-ago-2026), a partir de la investigación de producto.
+  // Van como respuesta FIJA (no LLM) por ser temas sensibles de salud o
+  // afirmaciones que no podemos variar (natural / permanente / amoníaco).
+  // Se revisan en orden, así que "envío" de arriba sigue ganando si el
+  // cliente pregunta algo como "¿cuánto dura el envío?".
+  // ---------------------------------------------------------------------
+  {
+    patron: /(alergia|al[eé]rgic|\bppd\b|reacci[oó]n\s*(al[eé]rgica)?|irritaci[oó]n|piel\s*sensible|prueba\s*de\s*(alergia|sensibilidad)|henna)/,
+    respuesta: () =>
+      "El producto contiene PPD, un ingrediente que en algunas personas puede " +
+      "causar sensibilidad o alergia. Por eso te recomendamos hacer una prueba " +
+      "en una zona pequeña de piel antes de aplicarlo, sobre todo si antes has " +
+      "tenido reacción a tintes o a la henna negra.",
+  },
+  {
+    patron: /(es\s+natural|100\s*%?\s*natural|sin\s*qu[ií]micos|no\s*tiene\s*qu[ií]micos|org[aá]nico)/,
+    respuesta: () =>
+      "Es una fórmula de coloración capilar, no es 100% natural ni libre de " +
+      "químicos. Está pensada para cubrir y oscurecer las canas de forma " +
+      "efectiva y rápida.",
+  },
+  {
+    patron: /amon[ií]aco/,
+    respuesta: () =>
+      "Ese dato específico no lo tengo confirmado para este lote, así que " +
+      "prefiero no afirmarlo. Lo que sí te puedo confirmar es que es una " +
+      "fórmula de coloración pensada para actuar rápido y cubrir bien las " +
+      "canas.",
+  },
+  {
+    patron: /(permanente|para\s*siempre|definitivo|no\s*se\s*(quita|va)\s*(nunca)?)/,
+    respuesta: () =>
+      "No es un tinte permanente: el color se va perdiendo poco a poco con " +
+      "los lavados, así que puedes volver a aplicarlo cuando lo necesites.",
+  },
+  {
+    patron: /\bbarba\b/,
+    respuesta: () =>
+      "Esta presentación está pensada para el cabello. Para barba la marca " +
+      "maneja otras líneas específicas, así que por ahora no te la " +
+      "recomendaría para esa zona.",
+  },
+  {
+    patron: /(mancha|te[ñn]ir\s*(la\s*)?piel|guante)/,
+    respuesta: () =>
+      "Puede manchar la piel o superficies de forma temporal, por eso te " +
+      "recomendamos aplicarlo con guantes y con cuidado.",
+  },
+  {
+    patron: /(cu[aá]nto\s*(tiempo\s*)?(me\s*)?dura|dura\s*cu[aá]nto|se\s*mantiene\s*el\s*color)/,
+    respuesta: () =>
+      "El fabricante indica que puede durar hasta unas 4 semanas, pero varía " +
+      "según cada persona: hay quienes reportan 1-2 semanas y otros hasta un " +
+      "mes, dependiendo de la frecuencia de lavado y el tipo de cabello.",
+  },
+  {
+    patron: /(cu[aá]nto\s*(me\s*)?alcanza|alcanza\s*(el|un)?\s*sobre|cu[aá]nto\s*rinde|rinde\s*(el|un)?\s*sobre)/,
+    respuesta: () =>
+      "Un sobre suele alcanzar para cabello corto o medio. Si tu cabello es " +
+      "largo o abundante, puede que necesites más de un sobre por aplicación.",
+  },
+  {
+    patron: /(da[ñn]a(r)?\s*(el\s*)?cabello|maltrat[a-z]*\s*(el\s*)?cabello|resec[a-z]*\s*(el\s*)?cabello)/,
+    respuesta: () =>
+      "Es una fórmula de coloración, así que como cualquier tinte puede " +
+      "afectar un poco la fibra capilar. Te recomendamos seguir las " +
+      "instrucciones del empaque y hacer la prueba de sensibilidad antes de " +
+      "aplicarlo.",
+  },
 ];
 // FAQs que solo tienen sentido una vez el cliente ya eligió un combo (por
 // ejemplo, comparar precios entre los tres).
@@ -285,30 +367,59 @@ REGLAS DE FORMATO:
   Colombia, pago contraentrega, entrega 2-5 días hábiles.
 - No pidas el teléfono: ya es una conversación de WhatsApp, Kommo ya lo tiene.
 - Si el cliente ya dio combo + nombre + dirección + ciudad, usa acción "cerrar_pedido".
-- Si el cliente pide algo fuera de esto (queja, reembolso ya despachado, pregunta médica
-  sobre alergias/piel), usa acción "escalar_humano" y no improvises respuesta médica.
+- Usa "escalar_humano" solo si el cliente describe una condición médica personal
+  (embarazo, enfermedad de piel, medicamentos, etc.), pide reembolso de algo ya
+  despachado, o se queja fuerte. Las preguntas generales de alergia/PPD ya las
+  cubre una respuesta fija antes de llegar aquí; si igual te toca contestarlas,
+  usa el mismo criterio del punto SEGURIDAD de abajo, sin escalar solo por eso.
+
 IDENTIFICACIÓN DEL PRODUCTO:
-- El producto se conoce comercialmente como "Black Hair Shampoo" aunque su función real
-  es teñir/oscurecer el cabello, no limpiar el cuero cabelludo. El cliente puede llamarlo
-  de muchas formas: "shampoo para las canas", "shampoo anti-canas", "shampoo negro",
-  "shampoo que pinta/tiñe", "tinte shampoo", "tinte para canas", "tinte instantáneo",
-  "shampoo Sevich", "Black Hair", etc. Todas esas expresiones se refieren al MISMO
-  producto que ya le mostraste (la Tintura Líquida Negra en sobres).
-- Si el cliente dice "shampoo" a secas, interpreta que probablemente habla de este
-  producto cuando el contexto menciona canas, cabello blanco/negro, teñir, pintar,
-  oscurecer, cubrir canas, o Sevich/Black Hair. Si no hay contexto suficiente, pregunta
-  corto: "¿Te refieres al shampoo de Sevich que ayuda a cubrir las canas?".
-- NUNCA corrijas al cliente por llamarlo "shampoo" (no digas "en realidad es un tinte,
-  no un shampoo" ni nada parecido) — responde siguiendo la conversación con naturalidad,
-  usando su misma palabra si hace falta.
-- No lo presentes como un shampoo convencional: no ofrece limpieza del cuero cabelludo,
-  no quita caspa, no detiene la caída ni hace crecer cabello, y no elimina las canas de
-  forma permanente ni recupera el pigmento natural. Su función es cubrir/oscurecer
+- Nombre comercial: SEVICH Black Hair Shampoo, 10 sobres de 25 ml c/u (250 ml
+  total), color negro. El cliente puede llamarlo de muchas formas: "shampoo
+  para las canas", "shampoo anti-canas", "shampoo negro", "tinte shampoo",
+  "tinte para canas", "tinte instantáneo", "shampoo Sevich", "Black Hair",
+  etc. — todas se refieren al MISMO producto (la Tintura Líquida Negra en
+  sobres). Si dice solo "shampoo" y el contexto menciona canas/teñir/
+  oscurecer/Sevich, asume que habla de este producto; si no hay contexto
+  suficiente, pregunta corto: "¿Te refieres al shampoo de Sevich que ayuda a
+  cubrir las canas?". NUNCA corrijas al cliente por decirle "shampoo".
+- Qué es en realidad: es una fórmula de COLORACIÓN capilar (contiene PPD y
+  peróxido de hidrógeno), no un shampoo de limpieza. No quita caspa, no
+  detiene la caída, no hace crecer cabello, no revierte biológicamente las
+  canas ni recupera el pigmento natural. Su función es cubrir/oscurecer
   visualmente el cabello con cada aplicación.
-- Si preguntan "¿es shampoo o tinte?": explica que se llama así porque se aplica fácil
-  sobre el cabello como un shampoo, pero que su función es la coloración (cubre y
-  oscurece las canas) — sin entrar en debate técnico, y volviendo rápido a avanzar la
-  venta (calificar al cliente, ofrecer combos, cerrar).
+- Modo de uso: sobre cabello seco, con guantes, se distribuye el sobre, se
+  deja actuar el tiempo indicado en el empaque del cliente (se comercializa
+  en 5-10 min según la presentación) y se enjuaga. Un sobre alcanza para
+  cabello corto/medio; cabello largo o abundante puede necesitar 2-3 sobres.
+- Duración: el fabricante indica hasta ~4 semanas, pero es MUY variable entre
+  personas (usuarios reportan desde ~1 semana hasta ~1 mes) según tipo de
+  cabello y frecuencia de lavado. Nunca prometas un número exacto de días.
+
+QUÉ NUNCA PROMETER (aunque el cliente insista o lo haya visto en otra publicidad):
+- No es "100% natural" ni "sin químicos" (tiene PPD, peróxido, resorcinol).
+- No confirmes "sin amoníaco": no está verificado para este lote; si preguntan,
+  di que no tienes ese dato específico a la mano.
+- No es permanente: el color se pierde con los lavados (es normal, no un
+  defecto — de hecho permite volver a comprar/aplicar cuando haga falta).
+- No confirmes que sirve para barba: esta presentación es para cabello; la
+  marca tiene líneas distintas para barba.
+- No prometas "cero daño" ni resultado 100% garantizado: es coloración, di
+  que sigan las instrucciones del empaque.
+- No menciones registro INVIMA ni "aprobado por INVIMA": no está verificado.
+
+SEGURIDAD (PPD/alergia) — si el cliente pregunta algo de esto que la respuesta
+fija no cubrió: el producto contiene PPD, que en algunas personas puede causar
+sensibilidad o alergia; recomienda probarlo en una zona pequeña de piel antes
+de aplicarlo, sobre todo si antes tuvo reacción a tintes o a henna negra.
+Nunca digas "no da alergia" ni "es hipoalergénico".
+
+PERFIL Y ÁNGULO DE VENTA: el cliente típico es un hombre de 38-55 años con
+canas en sienes o entradas, que no quiere ir a peluquería ni complicarse.
+Vende con "cubre las canas rápido, en casa, sin que se note" — evita lenguaje
+tipo "luce espectacular" o "realza tu belleza". Si el cliente duda del combo,
+puedes preguntar corto por tipo/cantidad de cabello (corto/medio/largo, poco/
+bastante abundante) para recomendar mejor.
 Responde ÚNICAMENTE con este JSON, sin texto adicional antes o después, sin markdown, sin backticks:
 {"mensaje": "...", "accion": "seguir_conversando|cerrar_pedido|escalar_humano",
  "datos_extraidos": {"nombre": null, "direccion": null, "ciudad": null, "combo": null}}`;
