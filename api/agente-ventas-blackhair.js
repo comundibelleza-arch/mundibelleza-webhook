@@ -242,7 +242,7 @@ const FAQ_SIEMPRE = [
     respuesta: () => "No, en esta campaña solo estamos ofertando el Black Hair Shampoo.",
   },
   {
-    patron: /(env[ií]o|entrega|demora|cu[aá]ndo\s*llega|tiempo\s*de\s*env[ií]o)/,
+    patron: /(env[ií]o|entrega|demora|tarda|cu[aá]ndo\s*llega|tiempo\s*de\s*env[ií]o)/,
     respuesta: () =>
       // ACORTADO (19-ago-2026): la versión original generaba 4 burbujas de
       // WhatsApp (261 caracteres) y a veces llegaban desordenadas. Esta
@@ -342,12 +342,41 @@ const FAQ_CON_COMBO = [
 // sí sabe leer matices.
 const PATRON_CONFIRMACION_FINAL =
   /^(s[ií]|correcto|confirmo|as[ií]\s*es|dale|ok|listo|exacto|perfecto|de\s*una|claro|todo\s*bien|eso\s*es)[\s.,!¡¿?]*$/i;
+// ---------------------------------------------------------------------------
+// AGREGADO (19-ago-2026), a partir de un caso real: el cliente ya había
+// elegido el Combo 3 y preguntó "¿dónde están ubicados?" a mitad del
+// checkout. La FAQ fija contestaba la pregunta y ahí se quedaba, sin volver
+// a pedir el dato que faltaba (nombre, en ese caso) — el mensaje no
+// terminaba en pregunta, así que el cliente no supo que se esperaba que
+// respondiera algo más, y la conversación se cortó.
+// Esta función decide cuál pregunta agregar al final de CUALQUIER respuesta
+// (FAQ fija o, más abajo, también se usa como guía para el LLM) cuando ya
+// hay un combo elegido: pide el siguiente dato que falte, en orden, o pide
+// confirmación final si ya están los 5. Antes de que haya combo elegido no
+// se fuerza ninguna pregunta extra (el saludo ya termina en "¿Cuál te
+// interesa?", no hace falta insistir más en esa etapa).
+// ---------------------------------------------------------------------------
+function preguntaSiguienteDato(estado) {
+  if (!estado.combo) return null;
+  if (!estado.nombre) return "¿Me regalas tu nombre completo para continuar con tu pedido?";
+  if (!estado.direccion) return "¿Cuál es tu dirección completa (calle y número)?";
+  if (!estado.ciudad) return "¿En qué municipio/ciudad es la entrega?";
+  if (!estado.departamento) return "¿Y en qué departamento queda eso?";
+  return "¿Confirmamos tu pedido con esos datos?";
+}
 function capaDeReglas(mensaje, estado) {
   const t = mensaje.toLowerCase();
-  // 1) FAQs generales: siempre activas, sin importar el estado.
+  // 1) FAQs generales: siempre activas, sin importar el estado. Si ya hay
+  // combo elegido, se le pega al final la pregunta por el siguiente dato
+  // que falte — así la FAQ nunca deja la conversación "colgada" sin pedir
+  // nada. Antes de elegir combo, se responde la FAQ tal cual, sin forzar
+  // pregunta extra.
   for (const regla of FAQ_SIEMPRE) {
     if (regla.patron.test(t)) {
-      return { texto: regla.respuesta(), accion: "seguir_conversando", datos: {} };
+      let texto = regla.respuesta();
+      const siguiente = preguntaSiguienteDato(estado);
+      if (siguiente) texto = `${texto} ${siguiente}`;
+      return { texto, accion: "seguir_conversando", datos: {} };
     }
   }
   // 1.5) Si ya está TODO el pedido completo (combo + nombre + dirección +
@@ -451,6 +480,18 @@ REGLAS DE FORMATO:
 - Nunca inventes datos de envío, garantías o políticas fuera de: envío gratis a toda
   Colombia, pago contraentrega, entrega 2-5 días hábiles.
 - No pidas el teléfono: ya es una conversación de WhatsApp, Kommo ya lo tiene.
+- REGLA GENERAL (la más importante de romper): si tu accion es
+  "seguir_conversando", tu mensaje SIEMPRE debe terminar en una pregunta
+  concreta, nunca en una afirmación o dato suelto. Ejemplo de lo que NO
+  hacer: responder una pregunta del cliente (envío, ubicación, etc.) y
+  quedarte ahí sin pedir nada más, aunque todavía te falte un dato del
+  pedido — eso corta la conversación porque el cliente no sabe que se
+  espera que responda algo. Si ya tienes combo elegido y todavía faltan
+  datos, SIEMPRE cierra tu respuesta pidiendo el siguiente dato que falte
+  (nombre → dirección → municipio → departamento, en ese orden), aunque el
+  mensaje del cliente haya sido sobre otra cosa (ej.: contesta su pregunta
+  de envío Y en la misma respuesta pide el dato que falte, terminando en
+  "?").
 - Antes de cerrar necesitas TODOS estos 5 datos: combo, nombre, dirección,
   municipio y departamento (son datos distintos: municipio es la ciudad/pueblo,
   departamento es la región más grande, ej. Medellín es municipio, Antioquia es
