@@ -78,6 +78,42 @@
 //     en capaDeReglas: esa confirmación final se reconoce por regex (gratis,
 //     sin LLM) en vez de tener que llamar al modelo otra vez solo para leer
 //     un "sí".
+//
+// AGREGADO (19-ago-2026) — EMBUDO DE PRE-CALIFICACIÓN para tráfico frío:
+// El negocio detectó que mostrar precio de una en el primer mensaje (el
+// viejo MENSAJE_BIENVENIDA como saludo inicial) está matando leads fríos:
+// llegan de un anuncio, no conocen la marca todavía, y ver 3 precios antes
+// de generar ningún interés los espanta. Se cambia el embudo así:
+//   Paso 0 (paso NATIVO de Kommo, fuera de este código, ya armado en el
+//           editor visual): "¿Cuántas canas tienes? 1 Pocas / 2 Bastantes /
+//           3 Muchas" — este código NO manda ese mensaje, solo interpreta
+//           la respuesta cuando llega.
+//   Paso 1 (este código): guarda el nivel de canas y pregunta "¿Qué buscas
+//           principalmente? 1 Disimular las canas / 2 Verte más joven /
+//           3 Ambas".
+//   Paso 2 (este código): guarda el objetivo y pregunta "¿Quieres ver las
+//           ofertas disponibles hoy? 1 Sí / 2 No, quiero saber más".
+//   Paso 3 (este código): si responde que sí, ahí recién se muestra
+//           MENSAJE_BIENVENIDA (el saludo con los 3 combos y precios, tal
+//           cual como estaba antes). Si responde que no, se manda un
+//           mensaje corto de valor/beneficios (sin precio) y se repite la
+//           misma pregunta, en loop, hasta que acepte ver las ofertas.
+//   Paso 4 en adelante: flujo de ventas de siempre (capaDeReglas / FAQs /
+//           LLM), sin cambios.
+// El progreso de este embudo (nivel de canas, objetivo, y en qué paso va)
+// se guarda en 3 campos personalizados NUEVOS del lead — son la única forma
+// de tener "memoria" entre llamadas, igual que el resto del estado. Ver
+// CAMPO_CANAS_ID / CAMPO_OBJETIVO_ID / CAMPO_FASE_ID más abajo: ya se
+// crearon en Kommo (vía PowerShell, POST /leads/custom_fields) y sus
+// field_id están cargados, así que FUNNEL_CANAS_HABILITADO queda en true y
+// el embudo nuevo ya está activo. Si alguna vez hay que desactivarlo sin
+// tocar más código, basta con volver alguno de los 3 a null.
+//
+// Nivel de canas y objetivo también se guardan para "más adelante" (ver
+// resumenEstado en llamarLLM): ya se le pasan al LLM como contexto por si
+// quiere personalizar el tono de la conversación de ventas (ej. alguien
+// que busca "verte más joven" vs. alguien que solo quiere "disimular"),
+// pero de momento no cambian qué combo se recomienda ni el precio.
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_TOKEN;
 const KOMMO_SUBDOMAIN = "comundibelleza";
@@ -86,6 +122,15 @@ const CAMPO_COMBO_ID = 1289164; // "Combo Blackhair"
 const CAMPO_NOMBRE_ID = 1288972; // ya existe ("Nombre cliente (IA)"), mismo que extraer-datos.js
 const CAMPO_DIRECCION_ID = 1289162; // "Direccion"
 const CAMPO_CIUDAD_ID = 1274145; // ya existe ("Cuidad" — así está escrito en la cuenta)
+// --- Campos del embudo de pre-calificación (19-ago-2026) ---------------
+// Creados en Kommo por PowerShell (POST /leads/custom_fields):
+//   - "Nivel de canas (IA)"     → lista desplegable: Pocas / Bastantes / Muchas
+//   - "Objetivo cliente (IA)"   → lista desplegable: Disimular las canas / Verse más joven / Ambas
+//   - "Fase embudo canas (IA)"  → texto (campo interno: guarda "objetivo" | "oferta" | "ventas")
+const CAMPO_CANAS_ID = 1289166; // "Nivel de canas (IA)"
+const CAMPO_OBJETIVO_ID = 1289168; // "Objetivo cliente (IA)"
+const CAMPO_FASE_ID = 1289170; // "Fase embudo canas (IA)"
+const FUNNEL_CANAS_HABILITADO = Boolean(CAMPO_CANAS_ID && CAMPO_OBJETIVO_ID && CAMPO_FASE_ID);
 // No hay campo de teléfono: como es una conversación de WhatsApp, Kommo ya
 // guarda el número en el contacto asociado al lead. No hace falta pedirlo
 // ni guardarlo aparte.
@@ -130,6 +175,11 @@ const COMBOS = {
 function formatoPrecio(n) {
   return "$" + n.toLocaleString("es-CO");
 }
+// IMPORTANTE (19-ago-2026): MENSAJE_BIENVENIDA ya NO es lo primero que ve
+// un lead frío. Ahora solo se manda cuando el cliente ya pasó por el
+// embudo de pre-calificación (canas → objetivo → "sí quiero ver ofertas").
+// Sigue existiendo tal cual porque, una vez el cliente pidió ver precios,
+// no tiene sentido esconderlos.
 const MENSAJE_BIENVENIDA =
   "¡Hola! 😊 Gracias por escribirnos. Somos Mundibelleza y esta es nuestra " +
   "Tintura Líquida Negra en sobres, fácil de aplicar en 5 minutos y con " +
@@ -144,6 +194,72 @@ const MENSAJE_BIENVENIDA =
 const MENSAJE_REPREGUNTA_COMBO =
   "No logré identificar cuál kit prefieres 🙏 ¿Me confirmas si quieres el " +
   "Combo 1, el Combo 2 o el Combo 3?";
+// ---------------------------------------------------------------------------
+// Mensajes del embudo de pre-calificación (19-ago-2026). El paso 0 (la
+// pregunta de "¿cuántas canas tienes?") NO está aquí porque es un paso
+// nativo de Kommo, armado en el editor visual, fuera de este código.
+// ---------------------------------------------------------------------------
+const NIVEL_CANAS_POR_NUMERO = { 1: "Pocas", 2: "Bastantes", 3: "Muchas" };
+const OBJETIVO_POR_NUMERO = { 1: "Disimular las canas", 2: "Verse más joven", 3: "Ambas" };
+// Texto exacto que el negocio ya definió para este paso.
+const MENSAJE_PREGUNTA_OBJETIVO =
+  "Perfecto 👍\n" +
+  "¿Qué buscas principalmente?\n" +
+  "1️⃣ Disimular las canas\n" +
+  "2️⃣ Verte más joven\n" +
+  "3️⃣ Ambas\n" +
+  "Responde solamente con el número.";
+// Texto exacto que el negocio ya definió para este paso.
+const MENSAJE_INVITACION_OFERTAS =
+  "Perfecto 👍\n" +
+  "Tenemos un producto en tono negro, pensado para hombres que quieren " +
+  "disimular las canas y conseguir una apariencia más uniforme.\n" +
+  "¿Quieres ver las ofertas disponibles hoy?\n" +
+  "1️⃣ Sí, quiero ver las ofertas\n" +
+  "2️⃣ No, quiero saber más\n" +
+  "Responde solamente con el número.";
+// Cuando responde "no, quiero saber más": un mensaje de valor/beneficios
+// SIN precio todavía, y se vuelve a invitar a ver las ofertas — se repite
+// hasta que el cliente acepte, en vez de forzar el precio de una.
+const MENSAJE_VALOR_BENEFICIOS =
+  "Es una tintura líquida negra en sobres: te la aplicas en casa en unos 5 " +
+  "minutos y cubre las canas al instante, sin ir a peluquería 💈. " +
+  MENSAJE_INVITACION_OFERTAS;
+const MENSAJE_REPREGUNTA_CANAS =
+  "No logré identificar tu respuesta 🙏 ¿me confirmas si tienes pocas (1), " +
+  "bastantes (2) o muchas (3) canas?";
+const MENSAJE_REPREGUNTA_OBJETIVO =
+  "No logré identificar tu respuesta 🙏 ¿buscas disimular las canas (1), " +
+  "verte más joven (2), o ambas (3)?";
+const MENSAJE_REPREGUNTA_OFERTA =
+  "No logré identificar tu respuesta 🙏 ¿quieres ver las ofertas disponibles " +
+  "hoy? Responde 1 para sí, o 2 si prefieres saber más primero.";
+// Parsers tolerantes: el negocio pide "responde solo con el número", pero
+// en la práctica la gente escribe "1", "la 1", "pocas", etc. Se acepta el
+// dígito en cualquier parte del mensaje, o la palabra clave.
+function detectarNivelCanas(texto) {
+  const t = (texto || "").toLowerCase();
+  if (/\bmucha/.test(t) || /\b3\b/.test(t)) return NIVEL_CANAS_POR_NUMERO[3];
+  if (/\bbastante/.test(t) || /\b2\b/.test(t)) return NIVEL_CANAS_POR_NUMERO[2];
+  if (/\bpoca/.test(t) || /\b1\b/.test(t)) return NIVEL_CANAS_POR_NUMERO[1];
+  return null;
+}
+function detectarObjetivo(texto) {
+  const t = (texto || "").toLowerCase();
+  if (/ambas|ambos|las\s*dos|\b3\b/.test(t)) return OBJETIVO_POR_NUMERO[3];
+  if (/joven/.test(t) || /\b2\b/.test(t)) return OBJETIVO_POR_NUMERO[2];
+  if (/disimul/.test(t) || /\b1\b/.test(t)) return OBJETIVO_POR_NUMERO[1];
+  return null;
+}
+// Para la pregunta de "¿quieres ver las ofertas?", true = sí / false = no /
+// null = no se entendió. Igual de tolerante: acepta "1"/"si"/"sí"/"dale" como
+// sí, y "2"/"no" como no.
+function detectarRespuestaSiNo(texto) {
+  const t = (texto || "").trim().toLowerCase();
+  if (/^(1|s[ií]|dale|claro|obvio|de\s*una)\b/.test(t) || /\b1\b/.test(t)) return true;
+  if (/^(2|no)\b/.test(t) || /\b2\b/.test(t)) return false;
+  return null;
+}
 // ---------------------------------------------------------------------------
 // Kommo rechaza execute_handlers.show con más de 80 caracteres (validado
 // contra logs reales: "This value is too long. It should have 80
@@ -425,6 +541,16 @@ function capaDeReglas(mensaje, estado) {
 // Redis/memoria: los campos del lead SON el estado).
 // ---------------------------------------------------------------------------
 async function leerEstadoDelLead(leadId) {
+  const estadoVacio = {
+    combo: null,
+    nombre: null,
+    direccion: null,
+    departamento: null,
+    ciudad: null,
+    nivelCanas: null,
+    objetivo: null,
+    fase: null,
+  };
   const resp = await fetch(
     `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
     { headers: { Authorization: `Bearer ${KOMMO_TOKEN}` } }
@@ -437,14 +563,14 @@ async function leerEstadoDelLead(leadId) {
   const texto = await resp.text();
   if (!resp.ok) {
     console.error("Error leyendo lead en Kommo:", resp.status, texto);
-    return { combo: null, nombre: null, direccion: null, departamento: null, ciudad: null };
+    return estadoVacio;
   }
   let data;
   try {
     data = texto ? JSON.parse(texto) : {};
   } catch (e) {
     console.error("Kommo respondió 200 pero el cuerpo no es JSON válido:", texto);
-    return { combo: null, nombre: null, direccion: null, departamento: null, ciudad: null };
+    return estadoVacio;
   }
   const campos = {};
   for (const f of data.custom_fields_values || []) {
@@ -454,13 +580,24 @@ async function leerEstadoDelLead(leadId) {
   // MARCADOR_DEPARTAMENTO arriba) — hay que separarlo para saber si ya se
   // capturó o si todavía falta pedirlo.
   const { direccion, departamento } = separarDireccionYDepartamento(campos[CAMPO_DIRECCION_ID] || null);
-  return {
+  const estado = {
     combo: campos[CAMPO_COMBO_ID] ? Number(campos[CAMPO_COMBO_ID]) : null,
     nombre: campos[CAMPO_NOMBRE_ID] || null,
     direccion,
     departamento,
     ciudad: campos[CAMPO_CIUDAD_ID] || null,
+    nivelCanas: CAMPO_CANAS_ID ? campos[CAMPO_CANAS_ID] || null : null,
+    objetivo: CAMPO_OBJETIVO_ID ? campos[CAMPO_OBJETIVO_ID] || null : null,
+    fase: CAMPO_FASE_ID ? campos[CAMPO_FASE_ID] || null : null,
   };
+  // Compatibilidad hacia atrás: un lead que ya venía conversando ANTES de
+  // que este embudo de pre-calificación existiera (o mientras
+  // FUNNEL_CANAS_HABILITADO todavía era false) puede tener combo ya
+  // elegido pero fase=null. Sin este ajuste, el código pensaría que el
+  // próximo mensaje de ese cliente es la respuesta a "¿cuántas canas
+  // tienes?" y le rompería la conversación a mitad de camino.
+  if (!estado.fase && estado.combo) estado.fase = "ventas";
+  return estado;
 }
 // ---------------------------------------------------------------------------
 // Llamada al LLM — mismo modelo y estilo (fetch directo) que ya usas en
@@ -480,6 +617,13 @@ REGLAS DE FORMATO:
 - Nunca inventes datos de envío, garantías o políticas fuera de: envío gratis a toda
   Colombia, pago contraentrega, entrega 2-5 días hábiles.
 - No pidas el teléfono: ya es una conversación de WhatsApp, Kommo ya lo tiene.
+- Si el estado te trae nivel_canas y/o objetivo ya capturados (vienen de un
+  embudo de pre-calificación previo, ya respondido por el cliente), puedes
+  usarlos para darle un toque personalizado al tono (ej. si objetivo es
+  "Verse más joven", puedes enmarcar el beneficio en verse más joven; si
+  nivel_canas es "Muchas", puedes mencionar que tal vez necesite más de un
+  sobre). Es opcional, no cambia el precio ni el combo recomendado, es solo
+  para que la conversación se sienta más a la medida.
 - REGLA GENERAL (la más importante de romper): si tu accion es
   "seguir_conversando", tu mensaje SIEMPRE debe terminar en una pregunta
   concreta, nunca en una afirmación o dato suelto. Ejemplo de lo que NO
@@ -511,7 +655,6 @@ REGLAS DE FORMATO:
   despachado, o se queja fuerte. Las preguntas generales de alergia/PPD ya las
   cubre una respuesta fija antes de llegar aquí; si igual te toca contestarlas,
   usa el mismo criterio del punto SEGURIDAD de abajo, sin escalar solo por eso.
-
 IDENTIFICACIÓN DEL PRODUCTO:
 - Nombre comercial: SEVICH Black Hair Shampoo, 10 sobres de 25 ml c/u (250 ml
   total), color negro. El cliente puede llamarlo de muchas formas: "shampoo
@@ -534,7 +677,6 @@ IDENTIFICACIÓN DEL PRODUCTO:
 - Duración: el fabricante indica hasta ~4 semanas, pero es MUY variable entre
   personas (usuarios reportan desde ~1 semana hasta ~1 mes) según tipo de
   cabello y frecuencia de lavado. Nunca prometas un número exacto de días.
-
 QUÉ NUNCA PROMETER (aunque el cliente insista o lo haya visto en otra publicidad):
 - No es "100% natural" ni "sin químicos" (tiene PPD, peróxido, resorcinol).
 - No confirmes "sin amoníaco": no está verificado para este lote; si preguntan,
@@ -546,13 +688,11 @@ QUÉ NUNCA PROMETER (aunque el cliente insista o lo haya visto en otra publicida
 - No prometas "cero daño" ni resultado 100% garantizado: es coloración, di
   que sigan las instrucciones del empaque.
 - No menciones registro INVIMA ni "aprobado por INVIMA": no está verificado.
-
 SEGURIDAD (PPD/alergia) — si el cliente pregunta algo de esto que la respuesta
 fija no cubrió: el producto contiene PPD, que en algunas personas puede causar
 sensibilidad o alergia; recomienda probarlo en una zona pequeña de piel antes
 de aplicarlo, sobre todo si antes tuvo reacción a tintes o a henna negra.
 Nunca digas "no da alergia" ni "es hipoalergénico".
-
 PERFIL Y ÁNGULO DE VENTA: el cliente típico es un hombre de 38-55 años con
 canas en sienes o entradas, que no quiere ir a peluquería ni complicarse.
 Vende con "cubre las canas rápido, en casa, sin que se note" — evita lenguaje
@@ -566,7 +706,8 @@ async function llamarLLM(estado, mensajeNuevo) {
   const resumenEstado =
     `Estado actual: combo=${estado.combo ?? "sin definir"}, nombre=${estado.nombre ?? "?"}, ` +
     `direccion=${estado.direccion ?? "?"}, municipio=${estado.ciudad ?? "?"}, ` +
-    `departamento=${estado.departamento ?? "?"}.`;
+    `departamento=${estado.departamento ?? "?"}, nivel_canas=${estado.nivelCanas ?? "?"}, ` +
+    `objetivo=${estado.objetivo ?? "?"}.`;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -642,6 +783,17 @@ async function actualizarLeadEnKommo(leadId, estado, accion) {
     });
   }
   if (estado.ciudad) campos.push({ field_id: CAMPO_CIUDAD_ID, values: [{ value: estado.ciudad }] });
+  // Campos del embudo de pre-calificación (solo si ya configuraste los
+  // field_id reales — ver CAMPO_CANAS_ID/CAMPO_OBJETIVO_ID/CAMPO_FASE_ID).
+  if (CAMPO_CANAS_ID && estado.nivelCanas) {
+    campos.push({ field_id: CAMPO_CANAS_ID, values: [{ value: estado.nivelCanas }] });
+  }
+  if (CAMPO_OBJETIVO_ID && estado.objetivo) {
+    campos.push({ field_id: CAMPO_OBJETIVO_ID, values: [{ value: estado.objetivo }] });
+  }
+  if (CAMPO_FASE_ID && estado.fase) {
+    campos.push({ field_id: CAMPO_FASE_ID, values: [{ value: estado.fase }] });
+  }
   const body = { custom_fields_values: campos };
   if (accion === "cerrar_pedido" && STAGE_PEDIDO_CONFIRMADO_ID) {
     // Se manda pipeline_id junto con status_id: aunque 142 ("Logrado con
@@ -741,7 +893,6 @@ async function avisarAKommoQueContinue(returnUrl, mensaje, accionKommo) {
     handler: "show",
     params: { type: "text", value: trozo },
   }));
-
   const body = {
     data: { mensaje, accion: accionKommo },
     execute_handlers: executeHandlers,
@@ -790,32 +941,91 @@ module.exports = async function handler(req, res) {
     const estado = await leerEstadoDelLead(leadId);
     let mensajeRespuesta;
     let accion = "seguir_conversando";
-    // 2) Intenta resolver por reglas primero (gratis). capaDeReglas ya
-    //    cubre dos casos según el estado: si todavía no hay combo, intenta
-    //    identificar cuál kit mencionó el cliente; si ya hay combo, revisa
-    //    las preguntas frecuentes de envío/pago/precio.
-    const porReglas = capaDeReglas(mensajeCliente, estado);
-    if (porReglas) {
-      mensajeRespuesta = porReglas.texto;
-      accion = porReglas.accion;
-      Object.assign(estado, porReglas.datos);
-    } else if (!estado.combo) {
-      // Las reglas no lograron identificar el kit. Si el cliente todavía
-      // no ha escrito nada (primer contacto real), manda el saludo
-      // completo con precios; si ya escribió algo pero no lo entendimos,
-      // se lo volvemos a preguntar corto, sin repetir todo el saludo.
-      mensajeRespuesta = mensajeCliente ? MENSAJE_REPREGUNTA_COMBO : MENSAJE_BIENVENIDA;
-    } else {
-      // 3) Ya hay combo y las reglas de FAQ no aplicaron: al LLM.
-      const resultado = await llamarLLM(estado, mensajeCliente);
-      mensajeRespuesta = resultado.mensaje;
-      accion = resultado.accion;
-      const d = resultado.datos_extraidos || {};
-      if (d.nombre) estado.nombre = d.nombre;
-      if (d.direccion) estado.direccion = d.direccion;
-      if (d.ciudad) estado.ciudad = d.ciudad;
-      if (d.departamento) estado.departamento = d.departamento;
-      if (d.combo) estado.combo = d.combo;
+    // ---------------------------------------------------------------------
+    // 2) EMBUDO DE PRE-CALIFICACIÓN (19-ago-2026), solo si ya configuraste
+    // los 3 campos nuevos en Kommo (FUNNEL_CANAS_HABILITADO). Mientras no
+    // los configures, este bloque se salta entero y el bot se comporta
+    // exactamente como antes (directo al flujo de ventas de abajo).
+    //
+    // estado.fase indica QUÉ pregunta está esperando responder el cliente
+    // con el mensaje que acaba de llegar:
+    //   null            -> el mensaje que llegó es la respuesta al paso 0
+    //                       nativo de Kommo ("¿cuántas canas tienes?").
+    //   "objetivo"      -> el mensaje que llegó es la respuesta a "¿qué
+    //                       buscas principalmente?".
+    //   "oferta"        -> el mensaje que llegó es sí/no a "¿quieres ver
+    //                       las ofertas?".
+    //   "ventas"        -> el embudo ya terminó, sigue el flujo de ventas
+    //                       de siempre (capaDeReglas/LLM), sin cambios.
+    // ---------------------------------------------------------------------
+    let yaResuelto = false;
+    if (FUNNEL_CANAS_HABILITADO && estado.fase !== "ventas") {
+      yaResuelto = true;
+      if (!estado.fase) {
+        // Respuesta a "¿cuántas canas tienes?" (paso nativo de Kommo).
+        const nivel = detectarNivelCanas(mensajeCliente);
+        if (!nivel) {
+          mensajeRespuesta = MENSAJE_REPREGUNTA_CANAS;
+        } else {
+          estado.nivelCanas = nivel;
+          estado.fase = "objetivo";
+          mensajeRespuesta = MENSAJE_PREGUNTA_OBJETIVO;
+        }
+      } else if (estado.fase === "objetivo") {
+        // Respuesta a "¿qué buscas principalmente?".
+        const objetivo = detectarObjetivo(mensajeCliente);
+        if (!objetivo) {
+          mensajeRespuesta = MENSAJE_REPREGUNTA_OBJETIVO;
+        } else {
+          estado.objetivo = objetivo;
+          estado.fase = "oferta";
+          mensajeRespuesta = MENSAJE_INVITACION_OFERTAS;
+        }
+      } else if (estado.fase === "oferta") {
+        // Respuesta a "¿quieres ver las ofertas disponibles hoy?".
+        const quiere = detectarRespuestaSiNo(mensajeCliente);
+        if (quiere === true) {
+          estado.fase = "ventas";
+          mensajeRespuesta = MENSAJE_BIENVENIDA;
+        } else if (quiere === false) {
+          // No cambia de fase: se queda en "oferta" y vuelve a invitar,
+          // en vez de forzar el precio antes de que el cliente esté listo.
+          mensajeRespuesta = MENSAJE_VALOR_BENEFICIOS;
+        } else {
+          mensajeRespuesta = MENSAJE_REPREGUNTA_OFERTA;
+        }
+      }
+    }
+    // 3) Si el embudo de pre-calificación no aplicó (o ya terminó), sigue
+    //    el flujo de ventas de siempre, sin cambios respecto a antes.
+    if (!yaResuelto) {
+      // 3a) Intenta resolver por reglas primero (gratis). capaDeReglas ya
+      //    cubre dos casos según el estado: si todavía no hay combo, intenta
+      //    identificar cuál kit mencionó el cliente; si ya hay combo, revisa
+      //    las preguntas frecuentes de envío/pago/precio.
+      const porReglas = capaDeReglas(mensajeCliente, estado);
+      if (porReglas) {
+        mensajeRespuesta = porReglas.texto;
+        accion = porReglas.accion;
+        Object.assign(estado, porReglas.datos);
+      } else if (!estado.combo) {
+        // Las reglas no lograron identificar el kit. Si el cliente todavía
+        // no ha escrito nada (primer contacto real), manda el saludo
+        // completo con precios; si ya escribió algo pero no lo entendimos,
+        // se lo volvemos a preguntar corto, sin repetir todo el saludo.
+        mensajeRespuesta = mensajeCliente ? MENSAJE_REPREGUNTA_COMBO : MENSAJE_BIENVENIDA;
+      } else {
+        // 3b) Ya hay combo y las reglas de FAQ no aplicaron: al LLM.
+        const resultado = await llamarLLM(estado, mensajeCliente);
+        mensajeRespuesta = resultado.mensaje;
+        accion = resultado.accion;
+        const d = resultado.datos_extraidos || {};
+        if (d.nombre) estado.nombre = d.nombre;
+        if (d.direccion) estado.direccion = d.direccion;
+        if (d.ciudad) estado.ciudad = d.ciudad;
+        if (d.departamento) estado.departamento = d.departamento;
+        if (d.combo) estado.combo = d.combo;
+      }
     }
     // 5) Guarda lo aprendido en Kommo (y mueve el pipeline solo si se cerró).
     await actualizarLeadEnKommo(leadId, estado, accion);
