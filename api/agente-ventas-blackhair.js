@@ -246,23 +246,29 @@ async function agregarNotaDeAudioNoLeido(leadId) {
 // ---------------------------------------------------------------------------
 const NIVEL_CANAS_POR_NUMERO = { 1: "Pocas", 2: "Bastantes", 3: "Muchas" };
 const OBJETIVO_POR_NUMERO = { 1: "Disimular las canas", 2: "Verse más joven", 3: "Ambas" };
-// Texto exacto que el negocio ya definió para este paso.
+// Texto del negocio para este paso, sin el "responde solamente con el
+// número" (19-ago-2026: se quitó porque suena muy a bot). El cliente puede
+// responder con el número o con la palabra ("disimular", "joven", "ambas",
+// etc.) — detectarObjetivo() ya acepta las dos formas, no dependía de esa
+// instrucción para funcionar.
 const MENSAJE_PREGUNTA_OBJETIVO =
   "Perfecto 👍\n" +
   "¿Qué buscas principalmente?\n" +
   "1️⃣ Disimular las canas\n" +
   "2️⃣ Verte más joven\n" +
-  "3️⃣ Ambas\n" +
-  "Responde solamente con el número.";
-// Texto exacto que el negocio ya definió para este paso.
+  "3️⃣ Ambas";
+// AGREGADO (19-ago-2026): esta es una pregunta de sí/no, así que a pedido
+// del negocio se le quitó también la lista de opciones numeradas (1️⃣ Sí /
+// 2️⃣ No) — queda como pregunta abierta, más natural. Las de nivel de canas
+// y objetivo NO son sí/no (son 3 opciones distintas), esas sí mantienen su
+// lista. detectarRespuestaSiNo() ya reconocía respuestas libres ("sí",
+// "no", "dale", "claro", etc.), no dependía de que estuvieran las opciones
+// escritas para funcionar.
 const MENSAJE_INVITACION_OFERTAS =
   "Perfecto 👍\n" +
   "Tenemos un producto en tono negro, pensado para hombres que quieren " +
   "disimular las canas y conseguir una apariencia más uniforme.\n" +
-  "¿Quieres ver las ofertas disponibles hoy?\n" +
-  "1️⃣ Sí, quiero ver las ofertas\n" +
-  "2️⃣ No, quiero saber más\n" +
-  "Responde solamente con el número.";
+  "¿Quieres ver las ofertas disponibles hoy?";
 // Cuando responde "no, quiero saber más": un mensaje de valor/beneficios
 // SIN precio todavía, y se vuelve a invitar a ver las ofertas — se repite
 // hasta que el cliente acepte, en vez de forzar el precio de una.
@@ -278,10 +284,12 @@ const MENSAJE_REPREGUNTA_OBJETIVO =
   "verte más joven (2), o ambas (3)?";
 const MENSAJE_REPREGUNTA_OFERTA =
   "No logré identificar tu respuesta 🙏 ¿quieres ver las ofertas disponibles " +
-  "hoy? Responde 1 para sí, o 2 si prefieres saber más primero.";
-// Parsers tolerantes: el negocio pide "responde solo con el número", pero
-// en la práctica la gente escribe "1", "la 1", "pocas", etc. Se acepta el
-// dígito en cualquier parte del mensaje, o la palabra clave.
+  "hoy, o prefieres que te cuente un poco más primero?";
+// Parsers tolerantes: aunque ya no se le pide al cliente "responde solo con
+// el número" (19-ago-2026: se quitó de los mensajes por sonar muy a bot),
+// igual puede escribir solo el número por costumbre — o la palabra clave
+// ("pocas", "joven", "sí", etc.). Estas funciones aceptan cualquiera de las
+// dos formas, así que no dependían de esa instrucción para funcionar.
 function detectarNivelCanas(texto) {
   const t = (texto || "").toLowerCase();
   if (/\bmucha/.test(t) || /\b3\b/.test(t)) return NIVEL_CANAS_POR_NUMERO[3];
@@ -299,10 +307,17 @@ function detectarObjetivo(texto) {
 // Para la pregunta de "¿quieres ver las ofertas?", true = sí / false = no /
 // null = no se entendió. Igual de tolerante: acepta "1"/"si"/"sí"/"dale" como
 // sí, y "2"/"no" como no.
+// BUG CORREGIDO (19-ago-2026), encontrado probando este mismo archivo: con
+// "\bsí\b" (tilde), JavaScript NO reconoce "í" como carácter de palabra en
+// una regex normal, así que el \b después de la í nunca hacía match — un
+// cliente que escribía "sí" (con tilde, lo normal en español) cada vez
+// caía en la repregunta en vez de avanzar. Se cambia el \b de después por
+// un lookahead que sí entiende letras acentuadas, para que "sí" (con o sin
+// tilde) funcione igual.
 function detectarRespuestaSiNo(texto) {
   const t = (texto || "").trim().toLowerCase();
-  if (/^(1|s[ií]|dale|claro|obvio|de\s*una)\b/.test(t) || /\b1\b/.test(t)) return true;
-  if (/^(2|no)\b/.test(t) || /\b2\b/.test(t)) return false;
+  if (/^(1|s[ií](?![a-záéíóúñ])|dale|claro|obvio|de\s*una)/.test(t) || /\b1\b/.test(t)) return true;
+  if (/^(2|no(?![a-záéíóúñ]))/.test(t) || /\b2\b/.test(t)) return false;
   return null;
 }
 // ---------------------------------------------------------------------------
