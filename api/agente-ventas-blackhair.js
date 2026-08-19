@@ -88,30 +88,51 @@ const MENSAJE_REPREGUNTA_COMBO =
 // Kommo rechaza execute_handlers.show con más de 80 caracteres (validado
 // contra logs reales: "This value is too long. It should have 80
 // characters or less."). Partimos cualquier mensaje en varios trozos
-// cortos, respetando saltos de línea y palabras completas, con margen de
-// seguridad porque emojis pueden contar más de 1 unidad.
+// cortos, con margen de seguridad porque emojis pueden contar más de 1
+// unidad. Prioridad de los cortes, para no perder coherencia:
+//   1) saltos de línea del mensaje original (cada línea es su propio
+//      grupo, así cada combo queda en su propia burbuja);
+//   2) dentro de cada línea, después de un ".", "!" o "?" seguido de
+//      espacio — o sea, entre oraciones completas, nunca a la mitad de
+//      una frase;
+//   3) solo si una sola oración ya es más larga que el límite (caso
+//      raro), como último recurso se envuelve por palabra completa.
+// Las oraciones/palabras se van empacando juntas hasta llenar el límite,
+// para no generar una burbuja por cada frase corta.
 // ---------------------------------------------------------------------------
 const MAX_SHOW_LEN = 75;
+function empacar(unidades, separador, maxLen) {
+  const trozos = [];
+  let actual = "";
+  for (const unidad of unidades) {
+    const candidato = actual ? `${actual}${separador}${unidad}` : unidad;
+    if (candidato.length > maxLen) {
+      if (actual) trozos.push(actual);
+      actual = unidad;
+    } else {
+      actual = candidato;
+    }
+  }
+  if (actual) trozos.push(actual);
+  return trozos;
+}
+function partirPorPalabra(texto, maxLen) {
+  return empacar(texto.split(/\s+/).filter(Boolean), " ", maxLen);
+}
 function partirEnTrozos(mensaje) {
-  // Respeta los saltos de línea del mensaje original como cortes de burbuja
-  // (así cada combo queda en su propia línea de WhatsApp en vez de partirse
-  // a la mitad), y dentro de cada línea envuelve por palabra completa.
   const lineas = mensaje.split("\n");
   const trozos = [];
   for (const linea of lineas) {
     if (!linea.trim()) continue; // las líneas vacías eran solo espaciado
-    const palabras = linea.split(/\s+/).filter(Boolean);
-    let actual = "";
-    for (const palabra of palabras) {
-      const candidato = actual ? `${actual} ${palabra}` : palabra;
-      if (candidato.length > MAX_SHOW_LEN) {
-        if (actual) trozos.push(actual);
-        actual = palabra;
-      } else {
-        actual = candidato;
-      }
-    }
-    if (actual) trozos.push(actual);
+    // Corta la línea en oraciones completas (después de ".", "!" o "?"
+    // seguido de espacio) en vez de por palabra suelta.
+    const oraciones = linea.split(/(?<=[.!?])\s+/).filter(Boolean);
+    // Si alguna oración por sí sola ya pasa el límite (raro), se envuelve
+    // por palabra solo esa oración, como último recurso.
+    const unidades = oraciones.flatMap((oracion) =>
+      oracion.length > MAX_SHOW_LEN ? partirPorPalabra(oracion, MAX_SHOW_LEN) : [oracion]
+    );
+    trozos.push(...empacar(unidades, " ", MAX_SHOW_LEN));
   }
   return trozos.length ? trozos : [""];
 }
@@ -266,6 +287,28 @@ REGLAS DE FORMATO:
 - Si el cliente ya dio combo + nombre + dirección + ciudad, usa acción "cerrar_pedido".
 - Si el cliente pide algo fuera de esto (queja, reembolso ya despachado, pregunta médica
   sobre alergias/piel), usa acción "escalar_humano" y no improvises respuesta médica.
+IDENTIFICACIÓN DEL PRODUCTO:
+- El producto se conoce comercialmente como "Black Hair Shampoo" aunque su función real
+  es teñir/oscurecer el cabello, no limpiar el cuero cabelludo. El cliente puede llamarlo
+  de muchas formas: "shampoo para las canas", "shampoo anti-canas", "shampoo negro",
+  "shampoo que pinta/tiñe", "tinte shampoo", "tinte para canas", "tinte instantáneo",
+  "shampoo Sevich", "Black Hair", etc. Todas esas expresiones se refieren al MISMO
+  producto que ya le mostraste (la Tintura Líquida Negra en sobres).
+- Si el cliente dice "shampoo" a secas, interpreta que probablemente habla de este
+  producto cuando el contexto menciona canas, cabello blanco/negro, teñir, pintar,
+  oscurecer, cubrir canas, o Sevich/Black Hair. Si no hay contexto suficiente, pregunta
+  corto: "¿Te refieres al shampoo de Sevich que ayuda a cubrir las canas?".
+- NUNCA corrijas al cliente por llamarlo "shampoo" (no digas "en realidad es un tinte,
+  no un shampoo" ni nada parecido) — responde siguiendo la conversación con naturalidad,
+  usando su misma palabra si hace falta.
+- No lo presentes como un shampoo convencional: no ofrece limpieza del cuero cabelludo,
+  no quita caspa, no detiene la caída ni hace crecer cabello, y no elimina las canas de
+  forma permanente ni recupera el pigmento natural. Su función es cubrir/oscurecer
+  visualmente el cabello con cada aplicación.
+- Si preguntan "¿es shampoo o tinte?": explica que se llama así porque se aplica fácil
+  sobre el cabello como un shampoo, pero que su función es la coloración (cubre y
+  oscurece las canas) — sin entrar en debate técnico, y volviendo rápido a avanzar la
+  venta (calificar al cliente, ofrecer combos, cerrar).
 Responde ÚNICAMENTE con este JSON, sin texto adicional antes o después, sin markdown, sin backticks:
 {"mensaje": "...", "accion": "seguir_conversando|cerrar_pedido|escalar_humano",
  "datos_extraidos": {"nombre": null, "direccion": null, "ciudad": null, "combo": null}}`;
