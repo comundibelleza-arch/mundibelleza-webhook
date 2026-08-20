@@ -1,11 +1,9 @@
 /**
  * api/extraer_campana_kommo_whatsapp.js
  *
- * Detecta el objeto `referral` (dato del anuncio de Meta) en CUALQUIER parte
- * del payload del webhook nativo de Kommo, sin asumir una ruta fija.
- * Si lo encuentra: (1) manda una nota de debug con el contenido, y
- * (2) llena el campo "Campaña" del lead con "Campaña 1" como prueba
- * de que el mecanismo de escritura funciona de punta a punta.
+ * VERSIÓN DE DIAGNÓSTICO: imprime el body crudo tal cual llega,
+ * sin ninguna suposición sobre su forma, para confirmar la
+ * estructura real que manda el webhook de Kommo/amoCRM.
  *
  * Requiere en Vercel:
  *  - KOMMO_API_TOKEN
@@ -22,11 +20,17 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
 
+  // --- DEBUG: imprimir el body crudo tal cual llega ---
+  console.log('BODY CRUDO:', JSON.stringify(req.body));
+  console.log('CONTENT-TYPE:', req.headers['content-type']);
+  // --- fin del bloque de debug ---
+
   try {
     const body = req.body;
     const messages = body?.message?.add;
 
     if (!Array.isArray(messages) || messages.length === 0) {
+      console.log('SKIP: no se encontró body.message.add como arreglo válido');
       return res.status(200).json({ ok: true, skipped: 'sin mensajes en el payload' });
     }
 
@@ -34,7 +38,10 @@ export default async function handler(req, res) {
 
     for (const msg of messages) {
       const leadId = msg?.entity_type === 'lead' ? msg?.entity_id : null;
-      if (!leadId) continue;
+      if (!leadId) {
+        console.log('SKIP mensaje sin leadId:', JSON.stringify(msg));
+        continue;
+      }
 
       const referral = buscarReferral(msg);
 
@@ -53,7 +60,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true, procesados: results });
   } catch (err) {
-    console.error('Error en extraer_campana_kommo_whatsapp:', err.message);
+    console.log('ERROR:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
