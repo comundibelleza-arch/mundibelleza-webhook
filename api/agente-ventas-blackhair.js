@@ -211,6 +211,13 @@ const MENSAJE_REPREGUNTA_COMBO =
 const MENSAJE_MEDIA_NO_SOPORTADA =
   "Por ahora no puedo escuchar audios ni ver archivos o imágenes 🙏 " +
   "¿me escribes lo que necesitas?";
+// AGREGADO (21-ago-2026): mensaje de respaldo para cuando algo falla a
+// mitad del proceso (ver el catch general y la rama de "no llegó lead_id"
+// más abajo) — antes, en esos casos, Kommo nunca recibía ningún
+// execute_handlers y el cliente se quedaba sin ninguna respuesta, en
+// silencio total. Ahora siempre se intenta mandar al menos esto.
+const MENSAJE_ERROR_TECNICO =
+  "Perdón, tuvimos un problema técnico 🙏 ¿me repites tu mensaje?";
 // AGREGADO (19-ago-2026), a pedido del negocio: además de pedirle al
 // cliente que escriba, deja una nota interna en el lead para que alguien
 // del equipo entre a Kommo/WhatsApp y escuche el audio (o vea la imagen/
@@ -319,6 +326,67 @@ function detectarRespuestaSiNo(texto) {
   if (/^(1|s[ií](?![a-záéíóúñ])|dale|claro|obvio|de\s*una)/.test(t) || /\b1\b/.test(t)) return true;
   if (/^(2|no(?![a-záéíóúñ]))/.test(t) || /\b2\b/.test(t)) return false;
   return null;
+}
+// ---------------------------------------------------------------------------
+// AGREGADO (21-ago-2026): respaldo por LLM para las 3 preguntas del embudo
+// de canas, para cuando el cliente responde con texto libre que no matchea
+// ningún patrón de detectarNivelCanas/detectarObjetivo/detectarRespuestaSiNo
+// (caso real: "Tengo el cabello blanco" en vez de "muchas" o "3"). Antes,
+// cualquier respuesta que no matcheara el regex SIEMPRE caía en la
+// repregunta ("No logré identificar tu respuesta 🙏"), obligando al cliente
+// a volver a responder con el número exacto del menú.
+// Solo se llama cuando el regex ya intentó y no encontró nada (nunca
+// reemplaza al regex, solo lo respalda) — así no se gasta una llamada al
+// LLM en el caso común de que el cliente sí responda con el número o la
+// palabra esperada. Se le pide a Claude que verifique si el mensaje se
+// puede mapear a una de las opciones del menú aunque no use esas palabras
+// exactas, y que devuelva solo el número de la opción, o "0" si no hay
+// relación clara.
+// Devuelve el texto EXACTO de una de las `opciones` recibidas, o null si
+// Claude no encontró relación clara, si la respuesta no vino en el formato
+// esperado, o si la llamada falló por cualquier motivo (red, cuota, etc.).
+// En todos esos casos de null el llamador cae de vuelta a la repregunta de
+// siempre, así que un fallo acá nunca deja al cliente sin respuesta.
+// ---------------------------------------------------------------------------
+async function clasificarConLLM(pregunta, opciones, mensajeCliente) {
+  if (!ANTHROPIC_API_KEY) return null;
+  const listaOpciones = opciones.map((o, i) => `${i + 1}) ${o}`).join("\n");
+  const prompt =
+    `Un cliente le está respondiendo a esta pregunta de un bot de ventas por WhatsApp:\n` +
+    `"${pregunta}"\n\nOpciones válidas:\n${listaOpciones}\n\n` +
+    `Respuesta del cliente: "${mensajeCliente}"\n\n` +
+    `¿A cuál opción se refiere el cliente, aunque no haya usado las palabras ` +
+    `exactas del menú? Responde ÚNICAMENTE con el número de la opción (ej: "2"), ` +
+    `o con "0" si la respuesta no tiene relación clara con ninguna opción. Sin ` +
+    `texto adicional, sin explicación.`;
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 10,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const cuerpoRespuesta = await response.text();
+    if (!response.ok) {
+      console.error("Error de la API de Claude (clasificarConLLM):", response.status, cuerpoRespuesta);
+      return null;
+    }
+    const data = cuerpoRespuesta ? JSON.parse(cuerpoRespuesta) : {};
+    const texto = data?.content?.[0]?.text?.trim() || "";
+    const numero = parseInt((texto.match(/\d+/) || [])[0] || "0", 10);
+    if (numero >= 1 && numero <= opciones.length) return opciones[numero - 1];
+    return null;
+  } catch (e) {
+    console.error("clasificarConLLM falló:", e.message);
+    return null;
+  }
 }
 // ---------------------------------------------------------------------------
 // Kommo rechaza execute_handlers.show con más de 80 caracteres (validado
@@ -973,15 +1041,30 @@ async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Método no permitido, usa POST" });
   }
+  // AGREGADO (21-ago-2026): leadId, returnUrl y mensajeCliente se declaran
+  // ANTES del try (con "let", ya no "const" adentro) para que el catch
+  // general de más abajo los pueda usar. Antes vivían solo dentro del try:
+  // si algo fallaba a mitad de la función (un fetch a Kommo o a Anthropic
+  // que rechazara la conexión, un JSON con forma inesperada, etc.), el catch
+  // no tenía ni el return_url para poder avisarle a Kommo qué pasó — el
+  // resultado real era que el cliente se quedaba sin NINGUNA respuesta, sin
+  // importar en qué punto del proceso hubiera fallado algo. Este es
+  // justamente el bug reportado: un cliente responde "3" y el bot se queda
+  // callado — no porque la lógica del embudo esté mal (se revisó y matchea
+  // bien), sino porque cualquier excepción en el camino terminaba en un 500
+  // silencioso, sin nunca llamar a avisarAKommoQueContinue().
+  let leadId = null;
+  let returnUrl = null;
+  let mensajeCliente = "";
   try {
-    const mensajeCliente =
+    mensajeCliente =
       (req.body &&
         (req.body["data[message_text]"] ||
           req.body.message_text ||
           req.body.text ||
           (req.body.data && req.body.data.message_text))) ||
       "";
-    let leadId =
+    leadId =
       (req.body && (req.body.lead_id || (req.body.additional_data && req.body.additional_data.id))) ||
       null;
     if (!leadId && req.body && req.body.token) {
@@ -993,8 +1076,14 @@ async function handler(req, res) {
         console.error("No se pudo decodificar el token JWT:", e.message);
       }
     }
-    const returnUrl = req.body && req.body.return_url;
+    returnUrl = req.body && req.body.return_url;
     if (!leadId) {
+      console.error("No se recibió lead_id. Body:", JSON.stringify(req.body));
+      // AGREGADO (21-ago-2026): antes esto cortaba con un 400 sin avisarle
+      // nunca a Kommo, dejando al cliente sin ninguna respuesta. Si al menos
+      // hay return_url, se le manda un mensaje de disculpa para no dejar la
+      // conversación colgada en silencio.
+      await avisarAKommoQueContinue(returnUrl, MENSAJE_ERROR_TECNICO, accionParaKommo("seguir_conversando"));
       return res.status(400).json({ error: "No se recibió lead_id", body_recibido: req.body });
     }
     // 1) Si no llegó texto (típicamente audio/imagen/archivo — ver
@@ -1036,7 +1125,17 @@ async function handler(req, res) {
       yaResuelto = true;
       if (!estado.fase) {
         // Respuesta a "¿cuántas canas tienes?" (paso nativo de Kommo).
-        const nivel = detectarNivelCanas(mensajeCliente);
+        let nivel = detectarNivelCanas(mensajeCliente);
+        if (!nivel) {
+          // El regex no matcheó nada (ej. "tengo el cabello blanco") — antes
+          // de repreguntar, se verifica con el LLM si se puede mapear a una
+          // de las 3 opciones aunque no use las palabras exactas del menú.
+          nivel = await clasificarConLLM(
+            "¿Cuántas canas tienes?",
+            ["Pocas", "Bastantes", "Muchas"],
+            mensajeCliente
+          );
+        }
         if (!nivel) {
           mensajeRespuesta = MENSAJE_REPREGUNTA_CANAS;
         } else {
@@ -1046,7 +1145,14 @@ async function handler(req, res) {
         }
       } else if (estado.fase === "objetivo") {
         // Respuesta a "¿qué buscas principalmente?".
-        const objetivo = detectarObjetivo(mensajeCliente);
+        let objetivo = detectarObjetivo(mensajeCliente);
+        if (!objetivo) {
+          objetivo = await clasificarConLLM(
+            "¿Qué buscas principalmente?",
+            ["Disimular las canas", "Verse más joven", "Ambas"],
+            mensajeCliente
+          );
+        }
         if (!objetivo) {
           mensajeRespuesta = MENSAJE_REPREGUNTA_OBJETIVO;
         } else {
@@ -1056,7 +1162,15 @@ async function handler(req, res) {
         }
       } else if (estado.fase === "oferta") {
         // Respuesta a "¿quieres ver las ofertas disponibles hoy?".
-        const quiere = detectarRespuestaSiNo(mensajeCliente);
+        let quiere = detectarRespuestaSiNo(mensajeCliente);
+        if (quiere === null) {
+          const opcion = await clasificarConLLM(
+            "¿Quieres ver las ofertas disponibles hoy?",
+            ["Sí, quiere ver las ofertas", "No, prefiere que le cuenten más primero"],
+            mensajeCliente
+          );
+          if (opcion) quiere = opcion === "Sí, quiere ver las ofertas";
+        }
         if (quiere === true) {
           estado.fase = "ventas";
           mensajeRespuesta = MENSAJE_BIENVENIDA;
@@ -1122,7 +1236,22 @@ async function handler(req, res) {
     await avisarAKommoQueContinue(returnUrl, mensajeRespuesta, accionKommo);
     return res.status(200).json({ ok: true, accion: accionKommo, mensaje: mensajeRespuesta });
   } catch (error) {
-    console.error("Error general en agente-ventas:", error);
+    console.error(`Error general en agente-ventas (lead ${leadId ?? "?"}, mensaje: "${mensajeCliente}"):`, error);
+    // AGREGADO (21-ago-2026): antes, cualquier excepción en medio del
+    // proceso terminaba aquí con solo un 500 — Kommo nunca recibía el
+    // execute_handlers que le dice qué mostrarle al cliente, así que el
+    // cliente se quedaba sin respuesta, sin siquiera un mensaje de error.
+    // Ahora, si se alcanzó a tener return_url, se le avisa a Kommo con un
+    // mensaje de disculpa genérico para no cortar la conversación en
+    // silencio. Va en su propio try/catch porque ya estamos en el catch
+    // general: si este intento también falla, no debe tumbar la función.
+    if (returnUrl) {
+      try {
+        await avisarAKommoQueContinue(returnUrl, MENSAJE_ERROR_TECNICO, accionParaKommo("seguir_conversando"));
+      } catch (e2) {
+        console.error("También falló el intento de avisarle el error a Kommo:", e2.message);
+      }
+    }
     return res.status(500).json({ error: "Error interno del servidor" });
   }
 }
