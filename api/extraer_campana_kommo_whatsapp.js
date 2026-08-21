@@ -40,17 +40,19 @@ export default async function handler(req, res) {
           const enumId = CAMPANA_ENUM_BASE + (numeroCampana - 1) * CAMPANA_ENUM_STEP;
           const patchResult = await asignarCampoCampana(leadId, enumId);
 
-          if (patchResult.ok) {
-            await enviarNotaInterna(
-              leadId,
-              `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}\nad_id: ${adId}\nenum_id usado: ${enumId}`
-            );
-          } else {
-            await enviarNotaInterna(
-              leadId,
-              `❌ Se detectó Campaña ${numeroCampana} (ad_id: ${adId}) pero falló al guardar el campo.\nenum_id: ${enumId}\nError: ${patchResult.error}`
-            );
-          }
+          const encabezado = patchResult.ok
+            ? `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}`
+            : `❌ Se detectó Campaña ${numeroCampana} pero falló al guardar el campo.`;
+
+          await enviarNotaInterna(
+            leadId,
+            construirNota({
+              encabezado,
+              adId,
+              enumId,
+              error: patchResult.ok ? null : patchResult.error,
+            })
+          );
 
           results.push({
             leadId,
@@ -64,7 +66,12 @@ export default async function handler(req, res) {
         } else {
           await enviarNotaInterna(
             leadId,
-            `⚠️ ad_id ${adId} no encontrado en la hoja de mapeo.\nAgrégalo a la hoja de cálculo para que se asigne automáticamente la próxima vez.`
+            construirNota({
+              encabezado: '⚠️ ad_id no encontrado en la hoja de mapeo. Agrégalo a la hoja de cálculo para que se asigne automáticamente la próxima vez.',
+              adId,
+              enumId: null,
+              error: null,
+            })
           );
           results.push({ leadId, evento: 'unsorted.add', adId, numeroCampana: null, ok: false });
         }
@@ -79,6 +86,17 @@ export default async function handler(req, res) {
     console.log('ERROR:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
+}
+
+/**
+ * Arma el texto de la nota interna con formato consistente, mostrando
+ * siempre el ad_id y el enum_id (o "N/A" si no se identificó campaña),
+ * para poder comparar contra la hoja de mapeo aunque no se haya asignado nada.
+ */
+function construirNota({ encabezado, adId, enumId, error }) {
+  let texto = `${encabezado}\nad_id: ${adId}\nenum_id: ${enumId ?? 'N/A'}`;
+  if (error) texto += `\nError: ${error}`;
+  return texto;
 }
 
 /**
