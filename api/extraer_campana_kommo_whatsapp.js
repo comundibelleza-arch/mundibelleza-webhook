@@ -14,7 +14,8 @@ export default async function handler(req, res) {
   console.log('BODY CRUDO:', JSON.stringify(req.body));
 
   try {
-    const body = req.body;
+    const body = desanidar(req.body);
+    console.log('BODY DESANIDADO:', JSON.stringify(body));
     const results = [];
 
     // Único evento que nos interesa: lead nuevo entrante (trae el ad_id)
@@ -61,6 +62,38 @@ export default async function handler(req, res) {
     console.log('ERROR:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
+}
+
+/**
+ * Kommo manda el body como application/x-www-form-urlencoded con claves
+ * "planas" al estilo PHP: "unsorted[add][0][lead_id]": "26151642".
+ * El parser por defecto de Vercel NO las anida automáticamente.
+ * Esta función reconstruye la estructura anidada real (objetos y arrays)
+ * a partir de esas claves.
+ */
+function desanidar(flat) {
+  const resultado = {};
+  if (!flat || typeof flat !== 'object') return resultado;
+
+  for (const [claveFlat, valor] of Object.entries(flat)) {
+    const partes = claveFlat.match(/[^\[\]]+/g);
+    if (!partes) continue;
+
+    let nodo = resultado;
+    for (let i = 0; i < partes.length; i++) {
+      const parte = partes[i];
+      const esUltima = i === partes.length - 1;
+
+      if (esUltima) {
+        nodo[parte] = valor;
+      } else {
+        const siguienteEsIndice = /^\d+$/.test(partes[i + 1]);
+        if (nodo[parte] == null) nodo[parte] = siguienteEsIndice ? [] : {};
+        nodo = nodo[parte];
+      }
+    }
+  }
+  return resultado;
 }
 
 /**
