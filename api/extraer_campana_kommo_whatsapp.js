@@ -40,19 +40,27 @@ export default async function handler(req, res) {
           const enumId = CAMPANA_ENUM_BASE + (numeroCampana - 1) * CAMPANA_ENUM_STEP;
           const patchResult = await asignarCampoCampana(leadId, enumId);
 
-          const encabezado = patchResult.ok
-            ? `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}`
-            : `❌ Se detectó Campaña ${numeroCampana} pero falló al guardar el campo.`;
-
-          await enviarNotaInterna(
-            leadId,
-            construirNota({
-              encabezado,
-              adId,
-              enumId,
-              error: patchResult.ok ? null : patchResult.error,
-            })
-          );
+          // QUITADO (21-ago-2026): antes aquí se llamaba a enviarNotaInterna()
+          // para dejar un aviso escrito en el lead. Esa nota estaba
+          // reactivando el paso nativo "Pausa: Hasta recibir mensaje" del
+          // Salesbot de agente-ventas-blackhair.js, que la tomaba como si
+          // fuera actividad nueva del cliente: el bot de ventas se disparaba
+          // sin que el cliente hubiera escrito nada, con mensaje vacío, y
+          // por eso respondía "no puedo escuchar audios ni ver archivos"
+          // sin que existiera ningún audio/archivo real. La lógica de
+          // detectar la campaña y guardar el campo sigue exactamente igual;
+          // solo se quitó el aviso dentro del lead. Se deja igual logueado
+          // por consola para poder revisarlo en Vercel si hace falta.
+          if (!patchResult.ok) {
+            console.error(
+              `Campaña ${numeroCampana} detectada para lead ${leadId} (ad_id ${adId}) pero falló al guardar el campo:`,
+              patchResult.error
+            );
+          } else {
+            console.log(
+              `Campaña ${numeroCampana} asignada automáticamente al lead ${leadId} (ad_id ${adId}, enum_id ${enumId}).`
+            );
+          }
 
           results.push({
             leadId,
@@ -64,15 +72,10 @@ export default async function handler(req, res) {
             patchError: patchResult.error || null,
           });
         } else {
-          await enviarNotaInterna(
-            leadId,
-            construirNota({
-              encabezado: '⚠️ ad_id no encontrado en la hoja de mapeo. Agrégalo a la hoja de cálculo para que se asigne automáticamente la próxima vez.',
-              adId,
-              enumId: null,
-              error: null,
-            })
-          );
+          // QUITADO (21-ago-2026): mismo motivo que arriba — ya no se manda
+          // la nota de "ad_id no encontrado en la hoja de mapeo", solo se
+          // deja logueado por consola.
+          console.log(`ad_id ${adId} no encontrado en la hoja de mapeo para lead ${leadId}.`);
           results.push({ leadId, evento: 'unsorted.add', adId, numeroCampana: null, ok: false });
         }
       }
@@ -187,6 +190,11 @@ async function asignarCampoCampana(leadId, enumId) {
   }
 }
 
+// NOTA (21-ago-2026): ya no se llama desde el flujo principal (ver el
+// comentario donde antes se usaba, más arriba) porque esa nota estaba
+// disparando por error al bot de ventas de agente-ventas-blackhair.js. Se
+// deja la función definida por si en el futuro se necesita mandar avisos
+// por otro canal (Slack, email) en vez de una nota dentro del lead.
 async function enviarNotaInterna(leadId, mensaje) {
   const token = process.env.KOMMO_TOKEN;
   if (!token) return { ok: false, error: 'KOMMO_TOKEN no configurada' };
