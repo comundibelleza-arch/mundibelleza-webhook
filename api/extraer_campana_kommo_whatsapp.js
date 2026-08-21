@@ -144,8 +144,8 @@ async function buscarCampanaPorAdId(adId) {
 }
 
 async function asignarCampoCampana(leadId, enumId) {
-  const token = process.env.KOMMO_API_TOKEN;
-  if (!token) return { ok: false, error: 'KOMMO_API_TOKEN no configurada' };
+  const token = process.env.KOMMO_TOKEN;
+  if (!token) return { ok: false, error: 'KOMMO_TOKEN no configurada' };
   try {
     const response = await fetch(
       `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
@@ -170,8 +170,8 @@ async function asignarCampoCampana(leadId, enumId) {
 }
 
 async function enviarNotaInterna(leadId, mensaje) {
-  const token = process.env.KOMMO_API_TOKEN;
-  if (!token) return { ok: false, error: 'KOMMO_API_TOKEN no configurada' };
+  const token = process.env.KOMMO_TOKEN;
+  if (!token) return { ok: false, error: 'KOMMO_TOKEN no configurada' };
   try {
     const response = await fetch(
       `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`,
