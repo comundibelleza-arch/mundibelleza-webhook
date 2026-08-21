@@ -1,17 +1,8 @@
-/**
- * api/extraer_campana_kommo_whatsapp.js
- *
- * Procesa dos tipos de evento del webhook nativo de Kommo:
- *  - unsorted[add]: lead entrante nuevo, trae el ad_id real del anuncio (ref)
- *  - message[add]: mensaje agregado (se mantiene por si acaso)
- *
- * Requiere en Vercel:
- *  - KOMMO_API_TOKEN
- */
-
 const KOMMO_SUBDOMAIN = 'comundibelleza';
 const CAMPO_CAMPANA_ID = 1289174;
-const CAMPANA_1_ENUM_ID = 935786;
+const CAMPANA_ENUM_BASE = 935786; // enum_id de "Campaña 1"
+const CAMPANA_ENUM_STEP = 2;      // cada opción siguiente suma 2
+const CAMPANA_MAX = 50;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,7 +17,7 @@ export default async function handler(req, res) {
     const body = req.body;
     const results = [];
 
-    // --- Evento: lead entrante nuevo (trae el ad_id) ---
+    // Único evento que nos interesa: lead nuevo entrante (trae el ad_id)
     const unsortedAdd = body?.unsorted?.add;
     if (Array.isArray(unsortedAdd)) {
       for (const item of unsortedAdd) {
@@ -36,36 +27,35 @@ export default async function handler(req, res) {
         const refString = item?.data?.contacts?.[0]?.profiles?.waba?.profile_data?.ref || '';
         const match = refString.match(/^ad:(\d+):/);
         const adId = match ? match[1] : null;
-        const texto = item?.source_data?.data?.[0]?.text || '(sin texto)';
 
-        const notaTexto = adId
-          ? `📌 AD_ID: ${adId}\nMensaje: ${texto}`
-          : `⚠️ Sin ad_id en ref.\nref crudo: ${refString}\nMensaje: ${texto}`;
-
-        await enviarNotaInterna(leadId, notaTexto);
-        results.push({ leadId, evento: 'unsorted.add', adId });
-      }
-    }
-
-    // --- Evento: mensaje agregado (se mantiene la lógica anterior) ---
-    const messages = body?.message?.add;
-    if (Array.isArray(messages)) {
-      for (const msg of messages) {
-        const leadId = msg?.entity_type === 'lead' ? msg?.entity_id : null;
-        if (!leadId) continue;
-        const referral = buscarReferral(msg);
-        if (referral) {
-          const debugTexto = '🔍 REFERRAL (message.add):\n' + JSON.stringify(referral, null, 2).slice(0, 2000);
-          await enviarNotaInterna(leadId, debugTexto);
+        if (!adId) {
+          results.push({ leadId, evento: 'unsorted.add', adId: null, skip: 'sin ad_id' });
+          continue;
         }
-        results.push({ leadId, evento: 'message.add', referralEncontrado: !!referral });
+
+        const numeroCampana = await buscarCampanaPorAdId(adId);
+
+        if (numeroCampana) {
+          const enumId = CAMPANA_ENUM_BASE + (numeroCampana - 1) * CAMPANA_ENUM_STEP;
+          await asignarCampoCampana(leadId, enumId);
+          await enviarNotaInterna(
+            leadId,
+            `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}\nad_id: ${adId}`
+          );
+          results.push({ leadId, evento: 'unsorted.add', adId, numeroCampana, ok: true });
+        } else {
+          await enviarNotaInterna(
+            leadId,
+            `⚠️ ad_id ${adId} no encontrado en la hoja de mapeo.\nAgrégalo a la hoja de cálculo para que se asigne automáticamente la próxima vez.`
+          );
+          results.push({ leadId, evento: 'unsorted.add', adId, numeroCampana: null, ok: false });
+        }
       }
     }
 
     if (results.length === 0) {
       return res.status(200).json({ ok: true, skipped: 'sin eventos reconocidos' });
     }
-
     return res.status(200).json({ ok: true, procesados: results });
   } catch (err) {
     console.log('ERROR:', err.message);
@@ -73,14 +63,57 @@ export default async function handler(req, res) {
   }
 }
 
-function buscarReferral(obj, depth = 0) {
-  if (!obj || typeof obj !== 'object' || depth > 6) return null;
-  if (obj.referral) return obj.referral;
-  for (const key of Object.keys(obj)) {
-    const found = buscarReferral(obj[key], depth + 1);
-    if (found) return found;
+/**
+ * Busca el ad_id en la hoja de cálculo publicada como CSV y devuelve
+ * el número de campaña (1-50) si lo encuentra, o null si no está mapeado.
+ */
+async function buscarCampanaPorAdId(adId) {
+  const sheetId = process.env.GOOGLE_SHEET_CAPTURA_ANUNCIO_ID;
+  const gid = process.env.GOOGLE_SHEET_CAPTURA_ANUNCIO_GID || '0';
+  if (!sheetId) return null;
+
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const csv = await response.text();
+    const lineas = csv.split('\n').map((l) => l.trim()).filter(Boolean);
+
+    for (const linea of lineas) {
+      const partes = linea.split(',').map((p) => p.trim().replace(/^"|"$/g, ''));
+      const [filaAdId, filaCampana] = partes;
+      if (filaAdId === adId) {
+        const numero = parseInt(filaCampana, 10);
+        if (numero >= 1 && numero <= CAMPANA_MAX) return numero;
+      }
+    }
+    return null;
+  } catch {
+    return null;
   }
-  return null;
+}
+
+async function asignarCampoCampana(leadId, enumId) {
+  const token = process.env.KOMMO_API_TOKEN;
+  if (!token) return { ok: false, error: 'KOMMO_API_TOKEN no configurada' };
+  try {
+    const response = await fetch(
+      `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
+      {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          custom_fields_values: [
+            { field_id: CAMPO_CAMPANA_ID, values: [{ enum_id: enumId }] },
+          ],
+        }),
+      }
+    );
+    if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 async function enviarNotaInterna(leadId, mensaje) {
