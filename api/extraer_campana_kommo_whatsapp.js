@@ -38,12 +38,29 @@ export default async function handler(req, res) {
 
         if (numeroCampana) {
           const enumId = CAMPANA_ENUM_BASE + (numeroCampana - 1) * CAMPANA_ENUM_STEP;
-          await asignarCampoCampana(leadId, enumId);
-          await enviarNotaInterna(
+          const patchResult = await asignarCampoCampana(leadId, enumId);
+
+          if (patchResult.ok) {
+            await enviarNotaInterna(
+              leadId,
+              `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}\nad_id: ${adId}\nenum_id usado: ${enumId}`
+            );
+          } else {
+            await enviarNotaInterna(
+              leadId,
+              `❌ Se detectó Campaña ${numeroCampana} (ad_id: ${adId}) pero falló al guardar el campo.\nenum_id: ${enumId}\nError: ${patchResult.error}`
+            );
+          }
+
+          results.push({
             leadId,
-            `✅ Campaña asignada automáticamente: Campaña ${numeroCampana}\nad_id: ${adId}`
-          );
-          results.push({ leadId, evento: 'unsorted.add', adId, numeroCampana, ok: true });
+            evento: 'unsorted.add',
+            adId,
+            numeroCampana,
+            enumId,
+            patchOk: patchResult.ok,
+            patchError: patchResult.error || null,
+          });
         } else {
           await enviarNotaInterna(
             leadId,
@@ -142,7 +159,10 @@ async function asignarCampoCampana(leadId, enumId) {
         }),
       }
     );
-    if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+    if (!response.ok) {
+      const detalle = await response.text().catch(() => '');
+      return { ok: false, error: `HTTP ${response.status}: ${detalle.slice(0, 300)}` };
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
