@@ -10,14 +10,19 @@
 // este archivo le manda la oferta de rebaja: el Combo 3 (3 cajas) a
 // $69.999 en vez de $99.999, como últimas unidades / selección limitada.
 //
-// ALCANCE A PROPÓSITO LIMITADO, igual que el primer nivel: solo actúa
-// sobre un lead que (a) todavía no tiene combo elegido, (b) no está ya con
-// un asesor humano, y (c) SÍ está marcado como "supercalificado" (lo pone
-// api/reactivar-lead-blackhair.js). Si falta la marca —por ejemplo, porque
-// CAMPO_SUPERCALIFICADO_ID todavía no se configuró en
-// agenteventasblackhair.js, o porque este webhook se disparó sin pasar
-// antes por el primer nivel— no manda la oferta: mejor omitir que ofrecer
-// un precio especial a quien no debía verlo.
+// ALCANCE (actualizado 22-ago-2026, a pedido del negocio): "todo el que
+// vio el precio va a ver la última oferta" — o sea, la regla ya NO exige
+// haber pasado por el primer nivel ni tener la marca "supercalificado"
+// puesta. Actúa sobre CUALQUIER lead que (a) ya vio los 3 combos con
+// precio (fase==="ventas"), (b) todavía no eligió combo, y (c) no está ya
+// con un asesor humano — es la MISMA condición que usa el primer nivel
+// (ver esLeadCalificadoSinComprar en reactivar-lead-blackhair.js), así que
+// si por cualquier motivo este webhook llega a dispararse sin haber
+// pasado antes por el primer nivel (ej. cableado distinto en el editor
+// visual), igual manda la oferta — no depende de esa marca para decidir.
+// La marca "supercalificado" se sigue guardando (abajo) porque el negocio
+// la quiere ver/filtrar en Kommo, pero es solo informativa: aquí ya no se
+// usa como filtro de elegibilidad.
 //
 // DECISIÓN (22-ago-2026): al mandar esta oferta, el lead también se
 // escala a un asesor humano (fase="asesor_humano", igual que cuando el
@@ -118,17 +123,18 @@ module.exports = async function handler(req, res) {
     const estado = await leerEstadoDelLead(leadId);
 
     // No manda la oferta si: ya está con un asesor humano, ya eligió
-    // combo, o todavía no pasó por el primer nivel de reactivación (no
-    // está marcado como "supercalificado" — ver reactivar-lead-blackhair.js).
-    if (estado.fase === "asesor_humano" || estado.combo || !estado.superCalificado) {
+    // combo, o nunca llegó a ver el precio (fase distinta de "ventas").
+    // "vio el precio" y "fase===ventas" son lo mismo en este bot — ver el
+    // comentario de arriba.
+    if (estado.fase !== "ventas" || estado.combo) {
       console.log(
-        `Lead ${leadId}: no se manda la oferta (fase="${estado.fase}", combo=${estado.combo}, supercalificado=${estado.superCalificado}).`
+        `Lead ${leadId}: no se manda la oferta (fase="${estado.fase}", combo=${estado.combo}).`
       );
       return res.status(200).json({
         ok: true,
         accion: "omitido",
         mensaje: null,
-        nota: "Lead ya escalado, ya con combo, o todavía no marcado como supercalificado; no se manda la oferta.",
+        nota: "Lead ya escalado, ya con combo, o nunca vio el precio; no se manda la oferta.",
       });
     }
 
@@ -138,8 +144,12 @@ module.exports = async function handler(req, res) {
     // continúe — así, si el cliente contesta casi de inmediato, ya
     // encuentra fase="asesor_humano" y el bot principal se queda callado
     // (ver el bloque `estado.fase === "asesor_humano"` al inicio del
-    // handler de agenteventasblackhair.js).
+    // handler de agenteventasblackhair.js). De paso deja la marca
+    // "supercalificado" en Kommo aunque este lead haya llegado aquí sin
+    // pasar por el primer nivel — es solo para que el equipo lo vea
+    // filtrado en Kommo, ver nota de alcance arriba.
     estado.fase = "asesor_humano";
+    estado.superCalificado = true;
     await actualizarLeadEnKommo(leadId, estado, "reactivado");
     await agregarNotaDeOfertaEnviada(leadId);
 
