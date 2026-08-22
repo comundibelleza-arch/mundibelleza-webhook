@@ -154,6 +154,16 @@ const CAMPO_CANAS_ID = 1289166; // "Nivel de canas (IA)"
 const CAMPO_OBJETIVO_ID = 1289168; // "Objetivo cliente (IA)"
 const CAMPO_FASE_ID = 1289170; // "Fase embudo canas (IA)"
 const FUNNEL_CANAS_HABILITADO = Boolean(CAMPO_CANAS_ID && CAMPO_OBJETIVO_ID && CAMPO_FASE_ID);
+// --- Campo "Supercalificado" (22-ago-2026) ------------------------------
+// A pedido del negocio: un lead que ya vio los 3 combos con precio
+// (fase==="ventas") pero después de 6 horas SIGUE sin elegir combo se marca
+// como "supercalificado" — es quien ve la oferta de rebaja más adelante
+// (ver api/reactivar-lead-blackhair.js y api/reactivar-oferta-lead-
+// blackhair.js). Este campo es SOLO para que el equipo lo vea/filtre en
+// Kommo (a diferencia de CAMPO_FASE_ID, no se usa para decidir qué
+// pregunta responder — no lo toques desde el flujo normal del embudo).
+// Ya se creó en Kommo (22-ago-2026, vía PowerShell) — id 1289180.
+const CAMPO_SUPERCALIFICADO_ID = 1289180; // "Supercalificado (IA)"
 // No hay campo de teléfono: como es una conversación de WhatsApp, Kommo ya
 // guarda el número en el contacto asociado al lead. No hace falta pedirlo
 // ni guardarlo aparte.
@@ -788,6 +798,7 @@ async function leerEstadoDelLead(leadId) {
     nivelCanas: null,
     objetivo: null,
     fase: null,
+    superCalificado: false,
   };
   const desdeCache = await leerCacheEstado(leadId);
   if (desdeCache) return desdeCache;
@@ -829,6 +840,7 @@ async function leerEstadoDelLead(leadId) {
     nivelCanas: CAMPO_CANAS_ID ? campos[CAMPO_CANAS_ID] || null : null,
     objetivo: CAMPO_OBJETIVO_ID ? campos[CAMPO_OBJETIVO_ID] || null : null,
     fase: CAMPO_FASE_ID ? campos[CAMPO_FASE_ID] || null : null,
+    superCalificado: CAMPO_SUPERCALIFICADO_ID ? campos[CAMPO_SUPERCALIFICADO_ID] === "si" : false,
   };
   // Compatibilidad hacia atrás: un lead que ya venía conversando ANTES de
   // que este embudo de pre-calificación existiera (o mientras
@@ -1033,6 +1045,9 @@ async function actualizarLeadEnKommo(leadId, estado, accion) {
   }
   if (CAMPO_FASE_ID && estado.fase) {
     campos.push({ field_id: CAMPO_FASE_ID, values: [{ value: estado.fase }] });
+  }
+  if (CAMPO_SUPERCALIFICADO_ID && estado.superCalificado) {
+    campos.push({ field_id: CAMPO_SUPERCALIFICADO_ID, values: [{ value: "si" }] });
   }
   const body = { custom_fields_values: campos };
   if (accion === "cerrar_pedido" && STAGE_PEDIDO_CONFIRMADO_ID) {
@@ -1496,6 +1511,14 @@ Object.assign(module.exports, {
   // mapeo de acciones.
   avisarAKommoQueContinue,
   accionParaKommo,
+  // AGREGADO (22-ago-2026): estas dos se exportan para que
+  // api/reactivar-oferta-lead-blackhair.js (segundo nivel de reactivación,
+  // la oferta de rebaja) pueda guardar el estado en Kommo y dejar la misma
+  // nota interna de escalado a humano que usa este archivo, sin duplicar
+  // ninguna de las dos funciones.
+  actualizarLeadEnKommo,
+  agregarNotaDeEscaladoHumano,
+  formatoPrecio,
   MENSAJE_BIENVENIDA,
   MENSAJE_REPREGUNTA_COMBO,
   MENSAJE_PREGUNTA_OBJETIVO,
