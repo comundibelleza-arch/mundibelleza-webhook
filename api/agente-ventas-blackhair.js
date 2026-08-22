@@ -1,4 +1,4 @@
-// api/agente-ventas-blackhair.js
+  // api/agente-ventas-blackhair.js
 //
 // Webhook de Salesbot (widget_request) para el agente de ventas de la
 // Tintura Líquida Negra / BlackHair Shampoo. Sigue el mismo patrón que
@@ -14,6 +14,10 @@
 // Requiere en Vercel:
 //  - ANTHROPIC_API_KEY  (ya la tienes)
 //  - KOMMO_TOKEN        (el mismo que usan extraer-datos.js / enviar_catalogo.js)
+//  - UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN (OPCIONALES — ver
+//    "AGREGADO (22-ago-2026): caché de estado" más abajo. Si no las
+//    configuras, el archivo sigue funcionando exactamente igual que antes,
+//    leyendo/escribiendo el estado solo en los campos del lead en Kommo.)
 //
 // CORREGIDO (18/19-ago-2026), a partir de logs reales de Vercel y del
 // editor visual del Salesbot:
@@ -117,6 +121,25 @@
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_TOKEN;
 const KOMMO_SUBDOMAIN = "comundibelleza";
+// AGREGADO (22-ago-2026): caché de estado en Upstash Redis (opcional).
+// Bug real detectado en producción: el estado de la conversación se lee y
+// escribe siempre en los campos personalizados del lead en Kommo, sin
+// ningún candado. Si el cliente manda dos mensajes seguidos muy rápido (o,
+// en pruebas, si tú mismo respondes rápido), el segundo mensaje puede
+// llegar a Kommo y pedir el estado del lead ANTES de que el PATCH del
+// primer mensaje haya terminado de escribirse/propagarse del lado de
+// Kommo — el bot entonces "ve" el estado viejo (ej. una fase anterior del
+// embudo de canas) y repite una pregunta que el cliente ya contestó. Ver
+// leerEstadoDelLead/actualizarLeadEnKommo/leerCacheEstado/
+// escribirCacheEstado más abajo.
+// Si estas dos variables no están configuradas en Vercel, redisComando()
+// devuelve null siempre y el archivo se comporta exactamente igual que
+// antes (Kommo como única fuente de estado) — no rompe nada por no
+// configurarlas, solo pierdes esta protección contra la condición de
+// carrera.
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const CACHE_ESTADO_TTL_SEGUNDOS = 45; // suficiente para mensajes rápidos seguidos; corto para que un cambio manual del estado en Kommo (por un humano en el equipo) no quede "atascado" mucho tiempo detrás de la caché
 // IDs de campos personalizados del lead (Configuración → Campos personalizados → Leads)
 const CAMPO_COMBO_ID = 1289164; // "Combo Blackhair"
 const CAMPO_NOMBRE_ID = 1288972; // ya existe ("Nombre cliente (IA)"), mismo que extraer-datos.js
@@ -591,6 +614,13 @@ const FAQ_CON_COMBO = [
 // sí sabe leer matices.
 const PATRON_CONFIRMACION_FINAL =
   /^(s[ií]|correcto|confirmo|as[ií]\s*es|dale|ok|listo|exacto|perfecto|de\s*una|claro|todo\s*bien|eso\s*es)[\s.,!¡¿?]*$/i;
+// NOTA (22-ago-2026): desde que apenas se elige combo el bot escala a un
+// asesor humano (ver la rama de detección de combo en capaDeReglas), un
+// lead NUEVO ya no debería llegar a tener los 5 datos completos por su
+// cuenta — este patrón y el cierre automático ("cerrar_pedido") quedan
+// como ruta viva solo para conversaciones que ya estaban en curso antes de
+// este cambio. No se borró la lógica por si acaso, pero no se espera que
+// se dispare para leads nuevos.
 // ---------------------------------------------------------------------------
 // AGREGADO (19-ago-2026), a partir de un caso real: el cliente ya había
 // elegido el Combo 3 y preguntó "¿dónde están ubicados?" a mitad del
@@ -648,15 +678,26 @@ function capaDeReglas(mensaje, estado) {
     };
   }
   // 2) Si todavía no hay combo, intenta identificar cuál kit quiere.
+  // CAMBIADO (22-ago-2026), a pedido del negocio: antes, desde aquí el bot
+  // seguía solo — preguntaba "¿es para ti o para alguien más?" y después
+  // recolectaba nombre/dirección/municipio/departamento él mismo, hasta
+  // cerrar el pedido automáticamente (ver PATRON_CONFIRMACION_FINAL más
+  // arriba). Ahora, apenas se identifica el combo, se corta ahí: se
+  // confirma el precio y se escala a un asesor humano, que es quien
+  // recolecta y valida esos datos y quien decide cuándo el pedido queda
+  // realmente cerrado — el bot ya no pone el lead en "cerrado" por su
+  // cuenta. Ver el bloque `estado.fase === "asesor_humano"` al inicio del
+  // handler: una vez escalado, el bot se queda callado en esta
+  // conversación aunque el cliente le siga escribiendo.
   if (!estado.combo) {
     const combo = detectarCombo(mensaje);
     if (combo) {
       return {
         texto: `¡Buena elección! El ${COMBOS[combo].nombre} te queda en ${formatoPrecio(
           COMBOS[combo].precio
-        )}. ¿Es para ti o para alguien más?`,
-        accion: "seguir_conversando",
-        datos: { combo },
+        )}. Ya te conecto con uno de nuestros asesores para confirmar tu pedido y coordinar el envío 😊`,
+        accion: "escalar_humano",
+        datos: { combo, fase: "asesor_humano" },
       };
     }
     return null;
@@ -670,8 +711,72 @@ function capaDeReglas(mensaje, estado) {
   return null;
 }
 // ---------------------------------------------------------------------------
-// Lee el estado actual del lead directo desde Kommo (esto reemplaza a
-// Redis/memoria: los campos del lead SON el estado).
+// AGREGADO (22-ago-2026): caché de estado por lead en Upstash Redis (API
+// REST, un solo comando por llamada — mismo estilo "fetch directo" que ya
+// se usa en todo este archivo, sin agregar ningún paquete npm nuevo).
+// Falla silenciosa a propósito: si Redis no está configurado, o la llamada
+// falla por lo que sea, estas funciones devuelven null/no hacen nada, y el
+// resto del código sigue funcionando exactamente igual que antes (Kommo
+// como única fuente de verdad). La caché NUNCA es la única fuente de
+// verdad — solo acelera/adelanta lo que de todas formas ya se escribió en
+// Kommo, con un TTL corto para que nunca quede desactualizada por mucho
+// tiempo si alguien edita el lead a mano en Kommo.
+// ---------------------------------------------------------------------------
+async function redisComando(args) {
+  if (!REDIS_URL || !REDIS_TOKEN) return null;
+  try {
+    const resp = await fetch(REDIS_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(args),
+    });
+    const texto = await resp.text();
+    if (!resp.ok) {
+      console.error("Error en comando Redis:", args[0], resp.status, texto);
+      return null;
+    }
+    let data;
+    try {
+      data = texto ? JSON.parse(texto) : null;
+    } catch (e) {
+      console.error("Redis respondió 200 pero el cuerpo no es JSON válido:", texto);
+      return null;
+    }
+    return data ? data.result : null;
+  } catch (e) {
+    console.error("redisComando falló:", e.message);
+    return null;
+  }
+}
+function claveCacheEstado(leadId) {
+  return `estado_lead_blackhair:${leadId}`;
+}
+async function leerCacheEstado(leadId) {
+  const valor = await redisComando(["GET", claveCacheEstado(leadId)]);
+  if (!valor) return null;
+  try {
+    return JSON.parse(valor);
+  } catch (e) {
+    console.error(`Caché de estado con JSON inválido para lead ${leadId}:`, valor);
+    return null;
+  }
+}
+async function escribirCacheEstado(leadId, estado) {
+  await redisComando([
+    "SET",
+    claveCacheEstado(leadId),
+    JSON.stringify(estado),
+    "EX",
+    String(CACHE_ESTADO_TTL_SEGUNDOS),
+  ]);
+}
+// ---------------------------------------------------------------------------
+// Lee el estado actual del lead. Primero intenta la caché (ver arriba); si
+// no hay nada ahí (primera vez, caché vencida, o Redis no configurado/
+// caído), lee directo de Kommo como se hacía antes.
 // ---------------------------------------------------------------------------
 async function leerEstadoDelLead(leadId) {
   const estadoVacio = {
@@ -684,6 +789,8 @@ async function leerEstadoDelLead(leadId) {
     objetivo: null,
     fase: null,
   };
+  const desdeCache = await leerCacheEstado(leadId);
+  if (desdeCache) return desdeCache;
   const resp = await fetch(
     `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
     { headers: { Authorization: `Bearer ${KOMMO_TOKEN}` } }
@@ -948,7 +1055,19 @@ async function actualizarLeadEnKommo(leadId, estado, accion) {
   );
   if (!resp.ok) {
     console.error("Error actualizando lead en Kommo:", resp.status, await resp.text());
+    // Si Kommo falló, NO actualizamos la caché — mejor que el próximo
+    // mensaje vuelva a intentar leer/reconciliar el estado real que
+    // dejar en caché algo que en realidad nunca se guardó.
+    return;
   }
+  // AGREGADO (22-ago-2026): guarda este mismo estado en la caché justo
+  // después de escribirlo en Kommo (ver la sección de caché arriba de
+  // leerEstadoDelLead). Esto es lo que cierra la condición de carrera: el
+  // PRÓXIMO mensaje de este mismo lead —aunque llegue un segundo
+  // después— va a encontrar este estado ya en caché en vez de arriesgarse
+  // a leer de Kommo antes de que el PATCH que acabamos de hacer se haya
+  // propagado del todo.
+  await escribirCacheEstado(leadId, estado);
 }
 // ---------------------------------------------------------------------------
 // AGREGADO (19-ago-2026): antes, cuando el bot cerraba un pedido, lo único
@@ -983,6 +1102,58 @@ async function agregarNotaDePedidoCerrado(leadId, estado) {
   );
   if (!resp.ok) {
     console.error("Error agregando nota de pedido cerrado en Kommo:", resp.status, await resp.text());
+  }
+}
+// ---------------------------------------------------------------------------
+// AGREGADO (22-ago-2026): nota interna para cuando se escala la
+// conversación a un asesor humano. Cubre dos casos con textos distintos:
+//  - El cliente acaba de elegir combo (estado.fase === "asesor_humano",
+//    puesto por la rama de detección de combo en capaDeReglas): todavía
+//    faltan los 4 datos del pedido, así que el aviso es "ve y recolecta
+//    esto tú mismo".
+//  - Cualquier otro motivo de escalado (condición médica, queja, reembolso
+//    — ver el SYSTEM_PROMPT del LLM): puede que ya haya algunos datos
+//    capturados de antes; el aviso muestra lo que se sabe y pide revisar
+//    el chat para el resto de contexto.
+// ---------------------------------------------------------------------------
+async function agregarNotaDeEscaladoHumano(leadId, estado) {
+  const nombreCombo = estado.combo && COMBOS[estado.combo] ? COMBOS[estado.combo].nombre : "sin definir";
+  const faltanDatosDelPedido = !estado.nombre || !estado.direccion || !estado.ciudad || !estado.departamento;
+
+  let texto;
+  if (estado.fase === "asesor_humano" && faltanDatosDelPedido) {
+    texto =
+      `🙋 Cliente listo para comprar — falta que un asesor tome la conversación\n` +
+      `Combo elegido: ${nombreCombo}\n` +
+      `El bot ya NO va a seguir pidiendo los datos del pedido. Un asesor debe ` +
+      `escribirle por WhatsApp/Kommo para confirmar nombre completo, dirección, ` +
+      `municipio y departamento, validar que todo esté bien, y cerrar el pedido ` +
+      `manualmente cuando corresponda.`;
+  } else {
+    texto =
+      `🙋 Conversación escalada a un asesor humano\n` +
+      `Combo: ${nombreCombo}\n` +
+      `Nombre: ${estado.nombre || "-"}\n` +
+      `Dirección: ${estado.direccion || "-"}\n` +
+      `Municipio: ${estado.ciudad || "-"}\n` +
+      `Departamento: ${estado.departamento || "-"}\n` +
+      `Revisa el chat para ver el motivo del escalado (condición médica, queja, ` +
+      `reembolso, u otro).`;
+  }
+
+  const resp = await fetch(
+    `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KOMMO_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([{ note_type: "common", params: { text: texto } }]),
+    }
+  );
+  if (!resp.ok) {
+    console.error("Error agregando nota de escalado a humano en Kommo:", resp.status, await resp.text());
   }
 }
 // ---------------------------------------------------------------------------
@@ -1124,6 +1295,29 @@ async function handler(req, res) {
     }
     // 2) Lee el estado actual directo de Kommo (esto ES la memoria de la conversación).
     const estado = await leerEstadoDelLead(leadId);
+
+    // AGREGADO (22-ago-2026), a pedido del negocio: si esta conversación ya
+    // se escaló a un asesor humano (ver el bloque de detección de combo en
+    // capaDeReglas, más arriba), el bot se queda callado de aquí en
+    // adelante — se asume que el asesor ya tomó la conversación manualmente
+    // desde Kommo/WhatsApp. No llamamos a capaDeReglas ni al LLM (ahorra
+    // esa llamada), y OJO: a propósito NO llamamos a
+    // avisarAKommoQueContinue/return_url aquí, así que no se manda ningún
+    // mensaje nuevo al cliente. Las salidas del widget (cerrado/escalado/
+    // seguir) las decide la respuesta JSON síncrona de abajo vía
+    // {{json.accion}}, no return_url, así que esto no debería dejar
+    // colgado el flujo del Salesbot — pero vale la pena confirmarlo con un
+    // caso real después de desplegar este cambio.
+    if (estado.fase === "asesor_humano") {
+      console.log(`Lead ${leadId}: ya escalado a asesor humano, el bot no responde.`);
+      return res.status(200).json({
+        ok: true,
+        accion: accionParaKommo("escalar_humano"),
+        mensaje: null,
+        nota: "Conversación ya escalada a un asesor humano; el bot no interviene.",
+      });
+    }
+
     let mensajeRespuesta;
     let accion = "seguir_conversando";
     // ---------------------------------------------------------------------
@@ -1246,11 +1440,13 @@ async function handler(req, res) {
       await agregarNotaDePedidoCerrado(leadId, estado);
     }
     if (accion === "escalar_humano") {
-      console.log(`Lead ${leadId} escalado a humano.`);
-      // TODO pendiente (mismo hueco que existía para cerrar_pedido antes de
-      // hoy): tampoco hay aviso activo cuando se escala a humano, solo este
-      // console.log. Si quieres, se le puede agregar la misma nota interna,
-      // o reusar enviarNotaInterna() como en webhook-carrito.js.
+      // AGREGADO (22-ago-2026): cierra el TODO que había aquí — antes solo
+      // quedaba un console.log y nadie se enteraba de que había que tomar
+      // la conversación. Ahora deja una nota interna real en el lead. Sirve
+      // tanto para el caso nuevo (cliente eligió combo, hay que recolectar
+      // sus datos) como para los casos viejos de escalado (condición
+      // médica, queja, reembolso — ver el SYSTEM_PROMPT del LLM).
+      await agregarNotaDeEscaladoHumano(leadId, estado);
     }
     // 7) Le devuelve el control al bot con el mensaje para el cliente y el
     //    código de acción traducido al vocabulario del widget (cerrado/
