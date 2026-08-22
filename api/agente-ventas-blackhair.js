@@ -427,6 +427,37 @@ async function clasificarConLLM(pregunta, opciones, mensajeCliente) {
   }
 }
 // ---------------------------------------------------------------------------
+// AGREGADO (22-ago-2026), a partir de un caso real: un cliente preguntó
+// "Precio" (y después "Q peecio tiene", con typo) en vez de responder
+// pocas/bastantes/muchas canas, y el bot se quedó repitiendo la pregunta de
+// canas en loop, sin nunca contestarle — se veía en los logs de la
+// conversación real, no en pruebas.
+// Se usa como ÚLTIMO recurso, solo cuando el paso actual del embudo (canas/
+// objetivo/oferta) YA intentó reconocer la respuesta esperada y falló — así
+// no se gasta una llamada extra al LLM en el camino feliz (cliente
+// contestando lo que se le preguntó), solo cuando se está a punto de
+// repreguntar por no haber entendido nada.
+// Si el cliente sí estaba preguntando el precio, se le muestra el saludo
+// con los 3 combos de una vez (ver dónde se usa, más abajo) y se salta fase
+// directo a "ventas" — que es la MISMA señal que ya usa la reactivación
+// (ver esLeadCalificadoSinComprar/MENSAJE_REACTIVACION_CALIFICADO en
+// reactivar-lead-blackhair.js) para saber que este lead ya vio el precio.
+// Así, si no vuelve a contestar, la reactivación automáticamente lo trata
+// como "ya tiene el precio" en vez de repreguntarle canas desde cero — sin
+// necesitar ningún campo ni bandera nueva en Kommo.
+// ---------------------------------------------------------------------------
+const PATRON_PIDE_PRECIO =
+  /preci|valor\b|cost[oa]|cu[aá]nto\s*(cuesta|vale|sale|cobran)|qu[eé]\s*(precio|vale|cuesta)/i;
+async function preguntaPorPrecio(mensajeCliente) {
+  if (PATRON_PIDE_PRECIO.test(mensajeCliente)) return true;
+  const opcion = await clasificarConLLM(
+    "¿El cliente está preguntando por el precio o costo del producto?",
+    ["Sí, pregunta por el precio", "No, no pregunta por el precio"],
+    mensajeCliente
+  );
+  return opcion === "Sí, pregunta por el precio";
+}
+// ---------------------------------------------------------------------------
 // Kommo rechaza execute_handlers.show con más de 80 caracteres (validado
 // contra logs reales: "This value is too long. It should have 80
 // characters or less."). Partimos cualquier mensaje en varios trozos
@@ -1369,7 +1400,12 @@ async function handler(req, res) {
           );
         }
         if (!nivel) {
-          mensajeRespuesta = MENSAJE_REPREGUNTA_CANAS;
+          if (await preguntaPorPrecio(mensajeCliente)) {
+            estado.fase = "ventas";
+            mensajeRespuesta = MENSAJE_BIENVENIDA;
+          } else {
+            mensajeRespuesta = MENSAJE_REPREGUNTA_CANAS;
+          }
         } else {
           estado.nivelCanas = nivel;
           estado.fase = "objetivo";
@@ -1386,7 +1422,12 @@ async function handler(req, res) {
           );
         }
         if (!objetivo) {
-          mensajeRespuesta = MENSAJE_REPREGUNTA_OBJETIVO;
+          if (await preguntaPorPrecio(mensajeCliente)) {
+            estado.fase = "ventas";
+            mensajeRespuesta = MENSAJE_BIENVENIDA;
+          } else {
+            mensajeRespuesta = MENSAJE_REPREGUNTA_OBJETIVO;
+          }
         } else {
           estado.objetivo = objetivo;
           estado.fase = "oferta";
@@ -1410,6 +1451,9 @@ async function handler(req, res) {
           // No cambia de fase: se queda en "oferta" y vuelve a invitar,
           // en vez de forzar el precio antes de que el cliente esté listo.
           mensajeRespuesta = MENSAJE_VALOR_BENEFICIOS;
+        } else if (await preguntaPorPrecio(mensajeCliente)) {
+          estado.fase = "ventas";
+          mensajeRespuesta = MENSAJE_BIENVENIDA;
         } else {
           mensajeRespuesta = MENSAJE_REPREGUNTA_OFERTA;
         }
