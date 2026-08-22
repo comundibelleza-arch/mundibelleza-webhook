@@ -225,6 +225,11 @@ const MENSAJE_ERROR_TECNICO =
 // información igual de importante que un mensaje de texto (ej. el cliente
 // mandó su dirección hablada). Mismo endpoint de notas que ya se usa para
 // agregarNotaDePedidoCerrado.
+// QUITADO (22-ago-2026): ya no se llama desde el flujo principal (ver el
+// comentario en el bloque de mensaje vacío, más abajo) mientras se confirma
+// si esta nota es la que reactiva por error el paso "Pausa: Hasta recibir
+// mensaje" del Salesbot. Se deja la función definida por si se retoma más
+// adelante (por otro canal, ej. Slack, en vez de una nota en el lead).
 async function agregarNotaDeAudioNoLeido(leadId) {
   const texto =
     `🎧 El cliente mandó un audio, imagen o archivo que el bot no puede leer.\n` +
@@ -1057,6 +1062,14 @@ async function handler(req, res) {
   let returnUrl = null;
   let mensajeCliente = "";
   try {
+    // AGREGADO (21-ago-2026): log del body crudo, igual que ya hace
+    // extraer-campana-kommo-whatsapp.js. Sin esto no hay forma de confirmar
+    // en Vercel qué mandó Kommo realmente cuando mensajeCliente sale vacío
+    // (caso real detectado: se etiquetó como "audio/imagen no soportada"
+    // un mensaje que probablemente no lo era — hay que ver el body real
+    // para saber si el texto venía bajo una clave distinta a las que ya
+    // revisamos abajo).
+    console.log("BODY CRUDO (ventas blackhair):", JSON.stringify(req.body));
     mensajeCliente =
       (req.body &&
         (req.body["data[message_text]"] ||
@@ -1093,9 +1106,19 @@ async function handler(req, res) {
     //    debería significar "primer contacto real" (ese ahora siempre llega
     //    con texto, porque responde a la pregunta nativa de canas).
     if (!mensajeCliente || !mensajeCliente.trim()) {
-      // Nota interna primero (para que quede aunque algo falle después) y
-      // luego el aviso a Kommo para que el bot le responda al cliente.
-      await agregarNotaDeAudioNoLeido(leadId);
+      // QUITADO (22-ago-2026): antes, aquí primero se llamaba a
+      // agregarNotaDeAudioNoLeido(leadId), que escribe una nota en el lead
+      // vía la API de Kommo. Hipótesis en investigación: esa nota (actividad
+      // sobre el lead vía API, igual que la que ya quitamos de
+      // extraer-campana-kommo-whatsapp.js) podría estar reactivando el paso
+      // nativo "Pausa: Hasta recibir mensaje" del Salesbot, lo que dispararía
+      // este mismo bloque otra vez con mensaje vacío -> nueva nota -> nueva
+      // reactivación -> loop. Coincide con el patrón real observado (el
+      // mensaje "no puedo escuchar audios" repitiéndose cada pocos minutos
+      // sin que el cliente escriba nada más). Se deja solo el console.log
+      // para no perder visibilidad del caso mientras se confirma la
+      // hipótesis con logs reales de Vercel.
+      console.log(`Lead ${leadId}: mensaje vacío (audio/imagen/archivo no soportado, o posible disparo sin mensaje real).`);
       await avisarAKommoQueContinue(returnUrl, MENSAJE_MEDIA_NO_SOPORTADA, accionParaKommo("seguir_conversando"));
       return res.status(200).json({ ok: true, accion: "seguir", mensaje: MENSAJE_MEDIA_NO_SOPORTADA });
     }
