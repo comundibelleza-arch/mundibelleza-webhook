@@ -1,4 +1,4 @@
-  // api/agente-ventas-blackhair.js
+// api/agente-ventas-blackhair.js
 //
 // Webhook de Salesbot (widget_request) para el agente de ventas de la
 // Tintura Líquida Negra / BlackHair Shampoo. Sigue el mismo patrón que
@@ -1489,6 +1489,13 @@ Object.assign(module.exports, {
   preguntaSiguienteDato,
   separarDireccionYDepartamento,
   combinarDireccionYDepartamento,
+  // AGREGADO (22-ago-2026): estas dos se exportan específicamente para que
+  // api/reactivar-lead-blackhair.js (el agente que reengancha leads que no
+  // contestaron en 6 horas) pueda avisarle a Kommo que continúe sin
+  // duplicar la lógica de partir mensajes en trozos de 80 caracteres ni el
+  // mapeo de acciones.
+  avisarAKommoQueContinue,
+  accionParaKommo,
   MENSAJE_BIENVENIDA,
   MENSAJE_REPREGUNTA_COMBO,
   MENSAJE_PREGUNTA_OBJETIVO,
